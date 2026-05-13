@@ -5,7 +5,7 @@ Full P9 sampled runs on Apple Silicon with `--cutoff 0.0006 --no-parallel-rewire
 
 | Machine | chip-id | compress (s) | sample (s) | total (s) | peak count / 1000 | date |
 |---|---|---:|---:|---:|---:|---|
-| M5 Pro | T6050 | 675.8 | 7.9 | 683.7 | 101 | 2026-05-12 |
+| M5 Pro | T6050 | 694.4 | 7.8 | **702.3** | 111 | 2026-05-13 |
 | M4 base | T8132 | 741.3 | 10.2 | **751.5** | 94 | 2026-05-13 |
 | M2 Pro | T6020 | 1042.2 | 14.0 | **1056.2** | 51 | 2026-05-13 |
 | **M1 Max** | T6000 | 1303.7 | 13.4 | **1317.1** | 50 | 2026-05-13 |
