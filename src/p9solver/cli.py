@@ -470,7 +470,7 @@ def build_parser():
         help=(
             "Stop cleanly after this many consecutive unswap cycles consume "
             "zero work gates. The error message recommends an alternate "
-            "cutoff (see STATUS_FOUR_MACHINE_CUTOFF_0006_PASS.md). Use a "
+            "cutoff (see BENCHMARKS.md). Use a "
             "negative value to disable this fail-fast guardrail."
         ),
     )

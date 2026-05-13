@@ -23,7 +23,7 @@ Validated laptop defaults:
 - midpoint cut: `0.5`
 - max MPO bond: `512`
 - compression cutoff: `0.0006` (verified on M1 Max, M2 Pro, M4 base, M5 Pro;
-  see `STATUS_FOUR_MACHINE_CUTOFF_0006_PASS.md`)
+  see `BENCHMARKS.md`)
 - unswap trigger: `500000` total tensor elements
 - parallel rewire: off (`--no-parallel-rewire`)
 - initial Sabre routing: `trials=90`, `heuristic=decay`
@@ -34,10 +34,7 @@ Validated laptop defaults:
 - unswap pass order: `both`, `left`, `right`
 - fail-fast stall guard: after 2 consecutive zero-work unswap cycles, the run
   stops with `termination_reason: no_progress_cycle_limit` and an error
-  message recommending a different `--cutoff`. The rescue rerouting and
-  forced-absorb fallbacks that earlier versions used to paper over this case
-  have been removed — empirically they never produced a result that the next
-  viable cutoff didn't produce faster and cleanly
+  message recommending a different `--cutoff`
 
 On the local M2 Pro test machine, this configuration produced the verified P9
 peak in `887.31s` total (`874.98s` compression plus `12.33s`
@@ -62,15 +59,14 @@ uv run p9solve --help
 
 ## Run The Benchmark
 
-Use this command for the public P9 benchmark. Run it from
-`peakpilot_v4/public_p9_solver`. Do not run a parallel-rewire job at the same
-time on the same machine.
+Use this command for the public P9 benchmark. Run it from the repo root. Do
+not run a parallel-rewire job at the same time on the same machine.
 
 ```bash
 uv run p9solve \
   --qasm circ/peaked_circuit_P9_Hqap_56x1917.qasm \
   --outdir runs \
-  --tag p9_no_parallel_rewire_s123 \
+  --tag p9 \
   --samples 1000 \
   --cutoff 0.0006 \
   --no-parallel-rewire
@@ -85,17 +81,11 @@ Expected result:
 - if compression hits a no-progress fixed point (`peak_max_bond` pinned at
   `--max-bond`), the run aborts cleanly after 2 zero-work cycles with
   `termination_reason: no_progress_cycle_limit`. The fix is to retry with a
-  different `--cutoff` (see `STATUS_FOUR_MACHINE_CUTOFF_0006_PASS.md`)
+  different `--cutoff` (see `BENCHMARKS.md`)
 - top sampled bitstring:
   `01101110111001100000100000001010011100101101010111110111`
 - `matches_expected_bitstring: true` in
-  `runs/p9_no_parallel_rewire_s123/summary.json`
-
-For a live progress dashboard during the run, in a second terminal:
-
-```bash
-uv run python diagnostics/live_dashboard.py runs/p9_no_parallel_rewire_s123
-```
+  `runs/p9/summary.json`
 
 The run writes:
 
@@ -109,10 +99,46 @@ truncation diagnostics, including how often rows or absorb probes hit the
 configured `--max-bond`.
 
 For cross-machine timings on Apple Silicon (M1 Max, M2 Pro, M4 base,
-M5 Pro) see `STATUS_FOUR_MACHINE_CUTOFF_0006_PASS.md`. If the run aborts
-with `termination_reason: no_progress_cycle_limit` on your hardware,
-either retry with a different `--cutoff` from the table in that file or
-fall back to the OpenBLAS env described in `OPENBLAS_WORKAROUND.md`.
+M5 Pro) see `BENCHMARKS.md`. If the run aborts with
+`termination_reason: no_progress_cycle_limit` on your hardware, retry
+with a different `--cutoff`.
+
+## Diagnostics
+
+Three visualization tools live under `diagnostics/`. The plot scripts pull
+in `matplotlib`; install the extra once:
+
+```bash
+uv sync --extra diagnostics
+```
+
+**Live terminal dashboard** — Rich-based panel that tails `run.log` and
+shows cycle, work-gate progress, current bond / total_elems, last rewire
+time, and a sparkline of cycle-end totals. Run in a second terminal:
+
+```bash
+uv run python diagnostics/live_dashboard.py runs/p9
+```
+
+**Compression timeline plot** — Kremer-style log-scale plot of total tensor
+elements and MPO bond dimension over both work consumed and wall time, with
+the `--max-bond` cap and unswap trigger drawn as dashed lines and cycle
+boundaries marked. Writes `runs/<tag>/plot.png`. Works on a finished run, or
+add `--watch` to refresh while a run is in flight (default 30 s, mtime-aware
+so it only re-renders when new rows arrive):
+
+```bash
+uv run python diagnostics/plot_run.py runs/p9            # one-shot
+uv run python diagnostics/plot_run.py runs/p9 --watch    # live refresh
+```
+
+**Sampling chart** — horizontal bar chart of the top sampled bitstrings,
+with the predicted peak highlighted and an explicit "matches expected"
+verdict. Writes `runs/<tag>/samples.png`:
+
+```bash
+uv run python diagnostics/plot_samples.py runs/p9
+```
 
 For a short compression-only smoke test:
 

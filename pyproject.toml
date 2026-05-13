@@ -16,6 +16,9 @@ dependencies = [
     "scipy==1.15.3",
 ]
 
+[project.optional-dependencies]
+diagnostics = ["matplotlib>=3.8"]
+
 [project.scripts]
 p9solve = "p9solver.cli:main"
 

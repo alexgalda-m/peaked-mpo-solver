@@ -2073,7 +2073,7 @@ def mpo_compress_unswap(
                     "likely landed on a slow SVD-truncation branch for this "
                     "BLAS/SoC. Retry with a different cutoff; verified-clean "
                     "values for Apple Silicon Accelerate are listed in "
-                    "STATUS_FOUR_MACHINE_CUTOFF_0006_PASS.md (start with "
+                    "BENCHMARKS.md (start with "
                     "--cutoff 0.0006).",
                     no_progress_unswap_cycles,
                     abort_after_no_progress_unswap_cycles,
