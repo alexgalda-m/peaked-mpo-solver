@@ -23,20 +23,14 @@ PEAK_COLOR = "#c0392b"
 BAR_COLOR = "#5b86b5"
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("run_dir")
-    p.add_argument("--out", default=None)
-    p.add_argument("--top", type=int, default=10)
-    args = p.parse_args()
-
-    run_dir = Path(args.run_dir)
+def render(run_dir, out=None, top_n=10):
+    run_dir = Path(run_dir)
     summary = json.loads((run_dir / "summary.json").read_text())
 
     top = summary.get("top_permuted_samples") or []
     if not top:
         raise SystemExit(f"no samples in {run_dir}/summary.json (was the run skip-sampling?)")
-    top = top[: args.top]
+    top = top[:top_n]
     top.reverse()  # so the largest ends up at the top of the bar chart
 
     bitstrings = [bs for bs, _ in top]
@@ -98,9 +92,20 @@ def main():
                  family="monospace", fontsize=8, color="#666")
 
     fig.tight_layout(rect=(0, 0.04, 1, 0.9))
-    out = Path(args.out) if args.out else run_dir / "samples.png"
+    out = Path(out) if out else run_dir / "samples.png"
     fig.savefig(out, dpi=140)
     plt.close(fig)
+    return out
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("run_dir")
+    p.add_argument("--out", default=None)
+    p.add_argument("--top", type=int, default=10)
+    args = p.parse_args()
+
+    out = render(args.run_dir, args.out, args.top)
     print(f"wrote {out}")
 
 

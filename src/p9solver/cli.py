@@ -4,6 +4,7 @@ import argparse
 import contextlib
 from collections import Counter
 import csv
+import importlib.util
 import io
 import json
 import logging
@@ -58,6 +59,21 @@ def write_json(path, data):
     with tmp_path.open("w") as handle:
         json.dump(data, handle, indent=2, default=str)
     tmp_path.replace(path)
+
+
+def load_diagnostic_module(name):
+    repo_root = Path(__file__).resolve().parents[2]
+    module_path = repo_root / "diagnostics" / f"{name}.py"
+    if not module_path.exists():
+        module_path = Path.cwd() / "diagnostics" / f"{name}.py"
+    if not module_path.exists():
+        raise FileNotFoundError(f"diagnostic module not found: diagnostics/{name}.py")
+    spec = importlib.util.spec_from_file_location(f"p9solver_diagnostics_{name}", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load diagnostics/{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def numeric_values(rows, key):
@@ -562,6 +578,21 @@ def build_parser():
         action="store_true",
         help="Compress only. Full submissions should leave sampling enabled.",
     )
+    parser.add_argument(
+        "--plots",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Write diagnostic PNGs by default: live plot.png during compression "
+            "and samples.png after sampling. Use --no-plots to disable."
+        ),
+    )
+    parser.add_argument(
+        "--plot-interval-s",
+        type=float,
+        default=30.0,
+        help="Minimum seconds between live plot.png refreshes during compression.",
+    )
     return parser
 
 
@@ -605,6 +636,15 @@ def main(argv=None):
 
     stats_live = []
     compression_started = None
+    plot_state = {
+        "last_live_refresh": 0.0,
+        "run_module": None,
+        "run_module_loaded": False,
+        "samples_module": None,
+        "samples_module_loaded": False,
+        "warned_run": False,
+        "warned_samples": False,
+    }
 
     def write_partial_summary(status):
         elapsed = (
@@ -627,26 +667,98 @@ def main(argv=None):
         write_rows_csv(stats_live, outdir / "stats.csv")
         write_json(outdir / "stats.json", stats_live)
         write_json(outdir / "summary.json", summary)
+        return summary
+
+    def maybe_render_live_plot(force=False):
+        if not args.plots:
+            return
+        now = time.perf_counter()
+        interval = max(0.0, args.plot_interval_s)
+        if (
+            not force
+            and plot_state["last_live_refresh"]
+            and now - plot_state["last_live_refresh"] < interval
+        ):
+            return
+        stats_csv = outdir / "stats.csv"
+        if not stats_csv.exists():
+            return
+        plot_state["last_live_refresh"] = now
+        if not plot_state["run_module_loaded"]:
+            try:
+                plot_state["run_module"] = load_diagnostic_module("plot_run")
+            except Exception as exc:
+                plot_state["warned_run"] = True
+                logging.warning("live plot.png generation disabled: %s", exc)
+            finally:
+                plot_state["run_module_loaded"] = True
+        module = plot_state["run_module"]
+        if module is None:
+            return
+        try:
+            module.render(stats_csv, outdir / "summary.json", outdir / "plot.png")
+        except Exception as exc:
+            if not plot_state["warned_run"]:
+                logging.warning("live plot.png refresh failed: %s", exc)
+                plot_state["warned_run"] = True
+
+    def render_samples_plot():
+        if not args.plots:
+            return
+        if not (outdir / "summary.json").exists():
+            return
+        if not plot_state["samples_module_loaded"]:
+            try:
+                plot_state["samples_module"] = load_diagnostic_module("plot_samples")
+            except Exception as exc:
+                plot_state["warned_samples"] = True
+                logging.warning("samples.png generation disabled: %s", exc)
+            finally:
+                plot_state["samples_module_loaded"] = True
+        module = plot_state["samples_module"]
+        if module is None:
+            return
+        try:
+            module.render(outdir, outdir / "samples.png")
+        except SystemExit as exc:
+            if not plot_state["warned_samples"]:
+                logging.info("samples.png not written: %s", exc)
+                plot_state["warned_samples"] = True
+        except Exception as exc:
+            if not plot_state["warned_samples"]:
+                logging.warning("samples.png generation failed: %s", exc)
+                plot_state["warned_samples"] = True
 
     def handle_live_stats(row):
         stats_live.append(row)
         if row.get("stage") == "termination":
             write_partial_summary("terminated")
+            maybe_render_live_plot(force=True)
             return
-        if row.get("stage") != "cycle_progress":
-            return
-        elapsed_s = float(row.get("time", 0.0))
-        gates_consumed = int(row.get("gates_consumed", row.get("u_consumed_total", 0)))
-        total_gates = row.get("total_work_gates")
-        total_gates = int(total_gates) if total_gates not in (None, "") else 0
-        percent = (100.0 * gates_consumed / total_gates) if total_gates else 0.0
-        print(
-            f"[Cycle {row.get('unswap_cycle')}] "
-            f"{gates_consumed}/{total_gates} gates ({percent:.1f} %) "
-            f"after {elapsed_s:.0f} sec",
-            flush=True,
+        now = time.perf_counter()
+        interval = max(0.0, args.plot_interval_s)
+        plot_due = (
+            not plot_state["last_live_refresh"]
+            or now - plot_state["last_live_refresh"] >= interval
         )
-        write_partial_summary("running")
+        should_checkpoint = plot_due
+        if row.get("stage") == "cycle_progress":
+            elapsed_s = float(row.get("time", 0.0))
+            gates_consumed = int(row.get("gates_consumed", row.get("u_consumed_total", 0)))
+            total_gates = row.get("total_work_gates")
+            total_gates = int(total_gates) if total_gates not in (None, "") else 0
+            percent = (100.0 * gates_consumed / total_gates) if total_gates else 0.0
+            print(
+                f"[Cycle {row.get('unswap_cycle')}] "
+                f"{gates_consumed}/{total_gates} gates ({percent:.1f} %) "
+                f"after {elapsed_s:.0f} sec",
+                flush=True,
+            )
+            should_checkpoint = True
+        if should_checkpoint:
+            write_partial_summary("running")
+        if plot_due:
+            maybe_render_live_plot(force=True)
 
     compression_started = time.perf_counter()
     mpo, layers_left, layers_right, stats = mpo_compress_unswap(
@@ -808,6 +920,8 @@ def main(argv=None):
 
     summary["run_status"] = "complete"
     write_json(outdir / "summary.json", summary)
+    maybe_render_live_plot(force=True)
+    render_samples_plot()
 
     print(json.dumps(summary, indent=2, default=str))
 

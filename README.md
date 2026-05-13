@@ -78,6 +78,9 @@ Expected result:
   `[Cycle 1] 8/1885 gates (0.4 %) after 14 sec`
 - `summary.json`, `stats.json`, and `stats.csv` are checkpointed after every
   live cycle, so interrupted or fail-fast runs still leave structured state
+- with diagnostics installed, `plot.png` is refreshed during compression every
+  30 seconds by default; use `--plot-interval-s` to change the cadence or
+  `--no-plots` to disable PNG generation
 - if compression hits a no-progress fixed point (`peak_max_bond` pinned at
   `--max-bond`), the run aborts cleanly after 2 zero-work cycles with
   `termination_reason: no_progress_cycle_limit`. The fix is to retry with a
@@ -92,6 +95,10 @@ The run writes:
 - `summary.json`: parameters, timing, tensor peaks, sampled peak bitstring
 - `stats.csv` and `stats.json`: compression timeline
 - `samples.tsv`: raw and measurement-permuted samples
+- `plot.png`: live compression timeline, refreshed during compression when
+  diagnostics dependencies are installed
+- `samples.png`: top sampled bitstrings after sampling completes when
+  diagnostics dependencies are installed
 - `run.log`: detailed execution log
 
 `summary.json` also records NumPy/SciPy BLAS/LAPACK configuration and
@@ -120,21 +127,23 @@ time, and a sparkline of cycle-end totals. Run in a second terminal:
 uv run python diagnostics/live_dashboard.py runs/p9
 ```
 
-**Compression timeline plot** — Kremer-style log-scale plot of total tensor
-elements and MPO bond dimension over both work consumed and wall time, with
-the `--max-bond` cap and unswap trigger drawn as dashed lines and cycle
-boundaries marked. Writes `runs/<tag>/plot.png`. Works on a finished run, or
-add `--watch` to refresh while a run is in flight (default 30 s, mtime-aware
-so it only re-renders when new rows arrive):
+**Compression timeline plot** — `p9solve` writes `runs/<tag>/plot.png` by
+default while compression runs, refreshed every 30 seconds. The plot is a
+Kremer-style log-scale plot of total tensor elements and MPO bond dimension
+over both work consumed and wall time, with the `--max-bond` cap and unswap
+trigger drawn as dashed lines and cycle boundaries marked. The standalone
+script still works on a finished run, or add `--watch` to refresh while a run
+is in flight:
 
 ```bash
 uv run python diagnostics/plot_run.py runs/p9            # one-shot
 uv run python diagnostics/plot_run.py runs/p9 --watch    # live refresh
 ```
 
-**Sampling chart** — horizontal bar chart of the top sampled bitstrings,
-with the predicted peak highlighted and an explicit "matches expected"
-verdict. Writes `runs/<tag>/samples.png`:
+**Sampling chart** — `p9solve` writes `runs/<tag>/samples.png` by default
+after sampling completes. It is a horizontal bar chart of the top sampled
+bitstrings, with the predicted peak highlighted and an explicit "matches
+expected" verdict. The standalone script remains available:
 
 ```bash
 uv run python diagnostics/plot_samples.py runs/p9
