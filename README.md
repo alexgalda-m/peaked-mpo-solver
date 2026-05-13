@@ -63,6 +63,13 @@ Use this command for the public P9 benchmark. Run it from the repo root. Do
 not run a parallel-rewire job at the same time on the same machine.
 
 ```bash
+examples/run_p9.sh "M2 Pro"
+```
+
+This expands the machine label into a run tag like `runs/p9_M2_Pro` and uses
+the validated public benchmark parameters. The equivalent explicit command is:
+
+```bash
 uv run p9solve \
   --qasm circ/peaked_circuit_P9_Hqap_56x1917.qasm \
   --outdir runs \
@@ -104,6 +111,11 @@ The run writes:
 `summary.json` also records NumPy/SciPy BLAS/LAPACK configuration and
 truncation diagnostics, including how often rows or absorb probes hit the
 configured `--max-bond`.
+
+For benchmark-table support, commit `summary.json`, `stats.csv`, `plot.png`,
+`samples.png`, and `samples.tsv` from each run folder. Do not commit
+`run.log` or `stats.json` by default; keep them for local debugging or failed
+run triage.
 
 For cross-machine timings on Apple Silicon (M1 Max, M2 Pro, M4 base,
 M5 Pro) see `BENCHMARKS.md`. If the run aborts with

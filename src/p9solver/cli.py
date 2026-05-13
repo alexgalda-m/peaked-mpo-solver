@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import platform
+import re
 import sys
 import time
 import warnings
@@ -66,6 +67,26 @@ def write_json(path, data):
     with tmp_path.open("w") as handle:
         json.dump(data, handle, indent=2, default=str)
     tmp_path.replace(path)
+
+
+def sanitize_local_metadata(value):
+    if isinstance(value, dict):
+        return {key: sanitize_local_metadata(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitize_local_metadata(item) for item in value]
+    if not isinstance(value, str):
+        return value
+
+    text = value
+    cwd = str(Path.cwd())
+    home = str(Path.home())
+    if cwd and cwd in text:
+        text = text.replace(cwd, "<repo>")
+    if home and home in text:
+        text = text.replace(home, "~")
+    text = re.sub(r"/private/var/folders/[^\s'\",)]+", "/private/var/folders/<redacted>", text)
+    text = re.sub(r"node='[^']+'", "node='<redacted>'", text)
+    return text
 
 
 def load_diagnostic_module(name):
@@ -189,7 +210,7 @@ def collect_environment():
             env["scipy_flapack"] = f"<failed: {type(exc).__name__}: {exc}>"
     except Exception as exc:
         env["scipy"] = f"<failed: {type(exc).__name__}: {exc}>"
-    return env
+    return sanitize_local_metadata(env)
 
 
 def summarize_truncation(rows, max_bond_limit):
