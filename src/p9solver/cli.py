@@ -36,6 +36,13 @@ def parse_center(value):
     return int(value)
 
 
+def parse_log_level(value):
+    level_name = value.upper()
+    if level_name not in logging._nameToLevel:
+        raise argparse.ArgumentTypeError(f"invalid log level: {value}")
+    return level_name
+
+
 def write_rows_csv(rows, path):
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     if not rows:
@@ -593,6 +600,15 @@ def build_parser():
         default=30.0,
         help="Minimum seconds between live plot.png refreshes during compression.",
     )
+    parser.add_argument(
+        "--console-log-level",
+        type=parse_log_level,
+        default="WARNING",
+        help=(
+            "Minimum level for terminal logging. run.log still records INFO. "
+            "Use INFO to restore verbose terminal logs."
+        ),
+    )
     return parser
 
 
@@ -603,13 +619,15 @@ def main(argv=None):
     outdir = Path(args.outdir) / tag
     outdir.mkdir(parents=True, exist_ok=True)
 
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging._nameToLevel[args.console_log_level])
+    file_handler = logging.FileHandler(outdir / "run.log", mode="w")
+    file_handler.setLevel(logging.INFO)
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=min(logging.INFO, logging._nameToLevel[args.console_log_level]),
         format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(outdir / "run.log", mode="w"),
-        ],
+        handlers=[console_handler, file_handler],
         force=True,
     )
 

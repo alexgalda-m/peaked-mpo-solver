@@ -7,7 +7,7 @@ Full P9 sampled runs on Apple Silicon with `--cutoff 0.0006 --no-parallel-rewire
 |---|---|---:|---:|---:|---:|---|
 | M5 Pro | T6050 | 694.4 | 7.8 | **702.3** | 111 | 2026-05-13 |
 | M4 base | T8132 | 741.3 | 10.2 | **751.5** | 94 | 2026-05-13 |
-| M2 Pro | T6020 | 991.1 | 13.8 | **1004.9** | 47 | 2026-05-13 |
+| M2 Pro | T6020 | 961.5 | 13.7 | **975.2** | 43 | 2026-05-13 |
 | **M1 Max** | T6000 | 1303.7 | 13.4 | **1317.1** | 50 | 2026-05-13 |
 
 All runs: `last_work_consumed: 1885`, `termination_reason: completed`,
