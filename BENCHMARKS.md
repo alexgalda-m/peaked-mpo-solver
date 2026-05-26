@@ -13,6 +13,26 @@ Full P9 sampled runs on Apple Silicon with `--cutoff 0.0006 --no-parallel-rewire
 All runs: `last_work_consumed: 1885`, `termination_reason: completed`,
 `matches_expected_bitstring: true`.
 
+## Comparison to the original GPU baseline
+
+The original Kremer & Dupuis result on this exact circuit
+([submission #106](https://github.com/quantum-advantage-tracker/quantum-advantage-tracker.github.io/issues/106),
+verified) used the same MPO + unswapping method on a single datacenter GPU:
+
+| Implementation         | Hardware                 | Runtime | Peak count |
+|------------------------|--------------------------|--------:|-----------:|
+| Kremer & Dupuis (#106) | 1× Nvidia A100 80 GB GPU |  4059 s | ~100/1000  |
+| This work (M5 Pro)     | Apple M5 Pro laptop CPU  |   734 s |    92/1000 |
+| This work (M1 Max)     | Apple M1 Max laptop CPU  |  1340 s |    36/1000 |
+
+The headline change is the **compute class**: the same simulation that needed a
+datacenter A100 80 GB GPU runs here on a consumer Apple Silicon laptop CPU with
+no GPU, producing a comparable ~10% peak with `matches_expected_bitstring: true`.
+Wall-clock is also ~3–5.5× faster, but the two runs use different compression
+cutoffs (this work fixes `--cutoff 0.0006`; the #106 cutoff is not stated), so
+the hardware-class change is the robust comparison and the raw wall-clock gap is
+partly configuration-dependent.
+
 ## Reproduce
 
 ```bash
