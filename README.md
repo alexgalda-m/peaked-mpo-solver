@@ -40,8 +40,12 @@ The QASM has 1917 `rzz` + 3890 `u` gates; Qiskit's `Collect2qBlocks` +
 blocks, which is what progress lines (`[Cycle 1] 8/1885 gates …`) count.
 
 If compression aborts with `termination_reason: no_progress_cycle_limit`,
-retry with a different `--cutoff` — see `BENCHMARKS.md` for verified
-values per machine.
+check the `stall_mode` in the termination row of `stats.json`: an
+`entanglement_blowup` stall is cutoff-sensitive (retry with a different
+`--cutoff` — see `BENCHMARKS.md`), while a `swap_thrash` stall is not — raise
+`--abort-after-no-progress-unswap-cycles` (e.g. `20`) or disable it with a
+negative value. See `BENCHMARKS.md` for both cases and a note on
+macOS/Accelerate reproducibility.
 
 ## Diagnostics
 

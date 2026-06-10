@@ -46,5 +46,30 @@ uv run p9solve \
   --no-parallel-rewire
 ```
 
-If your run aborts with `termination_reason: no_progress_cycle_limit`, retry
-with a different `--cutoff` (try `0.001` first).
+If your run aborts with `termination_reason: no_progress_cycle_limit`, check the
+`stall_mode` field in the termination row of `stats.json` (or the `run.log`
+error line) before changing anything — the two stall modes need opposite fixes:
+
+- **`stall_mode: entanglement_blowup`** — the MPO is pinned near `--max-bond`
+  or `--unswap-threshold` and no block can be absorbed without overflowing.
+  This is the cutoff-sensitive case: retry with a different `--cutoff` (try
+  `0.001` first), or raise `--max-bond` / `--unswap-threshold`.
+- **`stall_mode: swap_thrash`** — the MPO is *small* at the stall (low
+  `max_bond`, `total_elems` well under the threshold) but the last cycles
+  absorbed only routing SWAP layers before reaching the next 2q block, so zero
+  work gates were consumed. **Changing `--cutoff` will not help.** Raise
+  `--abort-after-no-progress-unswap-cycles` (e.g. `20`) or set it negative to
+  disable the guard, and let the reroute push past the patch.
+
+## A note on reproducibility across macOS / Accelerate versions
+
+The greedy unswap + reroute trajectory is numerically sensitive: routing is
+deterministic (Sabre, fixed `--seed`, pinned Qiskit), so the only moving part
+across two Apple Silicon machines with identical `qiskit`/`quimb`/`numpy`/`scipy`
+is the **Apple Accelerate LAPACK SVD**, which ships with the OS. Different macOS
+versions can nudge the truncated bond structure just enough to send the greedy
+path into a `swap_thrash` region on one machine and not another — even on the
+same chip family. The rows above were produced on macOS 26.x; on an older macOS
+the same hardware may need a higher `--abort-after-no-progress-unswap-cycles`
+to complete. If a run stalls in `swap_thrash` mode, that is the first knob to
+try, not the cutoff.

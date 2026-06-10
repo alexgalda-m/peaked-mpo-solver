@@ -2063,29 +2063,76 @@ def mpo_compress_unswap(
                 and no_progress_unswap_cycles >= abort_after_no_progress_unswap_cycles
             ):
                 termination_reason = "no_progress_cycle_limit"
+                # Classify the stall. Two very different failure modes share
+                # this termination reason, and they need opposite remedies:
+                #
+                #   (A) entanglement blow-up: the MPO is pinned near max_bond
+                #       and/or the unswap_threshold, so every candidate absorb
+                #       overflows and no block can be consumed. This is the
+                #       cutoff-sensitive case -- a different cutoff lands on a
+                #       cheaper truncation trajectory.
+                #
+                #   (B) swap-layer thrash: the MPO is small (well below both
+                #       the bond cap and the element threshold) but consecutive
+                #       cycles absorbed only routing SWAP layers before reaching
+                #       the next consolidated 2q block, so zero *work* gates
+                #       were consumed. Changing the cutoff does nothing here --
+                #       the fix is to let the loop run more cycles via
+                #       --abort-after-no-progress-unswap-cycles (or disable it
+                #       with a negative value).
+                core_elems = elem_counts(mpo_core)
+                core_max_bond = mpo_core.max_bond()
+                near_bond_cap = max_bond is not None and core_max_bond >= 0.5 * max_bond
+                near_threshold = core_elems >= 0.5 * unswap_threshold
+                if near_bond_cap or near_threshold:
+                    stall_mode = "entanglement_blowup"
+                    remedy = (
+                        f"The MPO is pinned near the size limits "
+                        f"(max_bond={core_max_bond} vs cap {max_bond}, "
+                        f"elems={core_elems} vs unswap_threshold "
+                        f"{unswap_threshold:.0f}), so no block can be absorbed "
+                        f"without overflowing. This is the cutoff-sensitive "
+                        f"branch: retry with a different --cutoff (verified "
+                        f"Apple Silicon Accelerate values are in BENCHMARKS.md; "
+                        f"start with --cutoff 0.0006), or raise --max-bond / "
+                        f"--unswap-threshold."
+                    )
+                else:
+                    stall_mode = "swap_thrash"
+                    remedy = (
+                        f"The MPO is small at the stall "
+                        f"(max_bond={core_max_bond} vs cap {max_bond}, "
+                        f"elems={core_elems} vs unswap_threshold "
+                        f"{unswap_threshold:.0f}) -- the last cycles absorbed "
+                        f"only routing SWAP layers before reaching the next 2q "
+                        f"block, so zero work gates were consumed. Changing "
+                        f"--cutoff will NOT help. Raise "
+                        f"--abort-after-no-progress-unswap-cycles (e.g. 20) or "
+                        f"set it negative to disable the guard and let the "
+                        f"reroute push past this patch."
+                    )
                 termination_detail = (
                     f"{no_progress_unswap_cycles} consecutive unswap cycles "
-                    f"consumed zero work gates at cutoff={cutoff}"
+                    f"consumed zero work gates at cutoff={cutoff} "
+                    f"[mode={stall_mode}]. {remedy}"
                 )
                 logging.error(
                     "aborting after %s consecutive no-progress unswap cycles "
-                    "(limit=%s, consumed=%s/%s, cutoff=%s). The current cutoff "
-                    "likely landed on a slow SVD-truncation branch for this "
-                    "BLAS/SoC. Retry with a different cutoff; verified-clean "
-                    "values for Apple Silicon Accelerate are listed in "
-                    "BENCHMARKS.md (start with "
-                    "--cutoff 0.0006).",
+                    "(limit=%s, consumed=%s/%s, cutoff=%s, mode=%s). %s",
                     no_progress_unswap_cycles,
                     abort_after_no_progress_unswap_cycles,
                     total_u_consumed,
                     T_U,
                     cutoff,
+                    stall_mode,
+                    remedy,
                 )
                 row = {
                     "time": time.perf_counter() - t0,
                     "stage": "termination",
                     "termination_reason": termination_reason,
                     "termination_detail": termination_detail,
+                    "stall_mode": stall_mode,
                     "unswap_cycle": unswap_cycles,
                     "u_consumed_total_left": total_u_consumed_left,
                     "u_consumed_total_right": total_u_consumed_right,
