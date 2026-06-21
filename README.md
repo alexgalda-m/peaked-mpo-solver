@@ -4,10 +4,10 @@ CPU-oriented MPO + unswapping solver for the 56-qubit P9 peaked-circuit
 benchmark (`peaked_circuit_P9_Hqap_56x1917`). Builds on the midpoint-MPO +
 greedy-unswap strategy of Kremer & Dupuis
 ([d-kremer/peaked-circuit-simulation](https://github.com/d-kremer/peaked-circuit-simulation),
-arXiv:2604.21908), and extends it with symmetric (both-sided) unswapping,
-cached SWAP-layer MPO construction, full parity-swap probe reuse, and
-route-aware unswap candidate selection. Runs the full sampled benchmark
-in 12–22 min on stock Apple Silicon laptops — versus ~68 min on a single
+arXiv:2604.21908), and extends it with cached SWAP-layer MPO construction,
+full parity-swap probe reuse, and route-aware unswap candidate selection.
+Runs the full sampled benchmark in 12–22 min on stock Apple Silicon laptops
+— versus ~68 min on a single
 Nvidia A100 80 GB GPU in the original submission
 ([#106](https://github.com/quantum-advantage-tracker/quantum-advantage-tracker.github.io/issues/106))
 — see [`BENCHMARKS.md`](BENCHMARKS.md).
