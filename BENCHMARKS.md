@@ -29,7 +29,8 @@ datacenter A100 80 GB GPU runs here on a consumer Apple Silicon laptop CPU with
 no GPU, producing a comparable ~10% peak with `matches_expected_bitstring: true`.
 Wall-clock favors the laptop too (~5.5× faster), but that gap is partly
 configuration-dependent since the two runs use different compression cutoffs
-(this work fixes `--cutoff 0.0006`; the #106 cutoff is not stated). The decisive,
+(this work fixes `--cutoff 0.0006`; #106 uses `ϵ = 2×10⁻³` with `χ_max = 8192`,
+per Kremer & Dupuis Appendix A.4). The decisive,
 hardware-level comparison is **a single datacenter Nvidia A100 80 GB GPU vs a
 consumer laptop CPU with no GPU at all** — that shift in compute class is the
 robust improvement.
