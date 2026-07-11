@@ -41,11 +41,15 @@ def load_rows(stats_csv: Path):
     rows = []
     last_work = 0.0
     cap = None
+    total_work = None
     with stats_csv.open() as f:
         for r in csv.DictReader(f):
             work = _f(r.get("u_consumed_total"))
             if work is not None:
                 last_work = work
+            twg = _f(r.get("total_work_gates"))
+            if twg is not None:
+                total_work = twg
             te = _f(r.get("total_elems"))
             mb = _f(r.get("max_bond"))
             t = _f(r.get("time"))
@@ -60,7 +64,7 @@ def load_rows(stats_csv: Path):
                 "stage": r.get("stage", ""),
                 "hit": r.get("hit_max_bond", "").lower() == "true",
             })
-    return rows, cap
+    return rows, cap, total_work
 
 
 def split(rows, key, stage=None):
@@ -76,7 +80,8 @@ def split(rows, key, stage=None):
 
 
 def render(stats_csv: Path, summary_json: Path | None, out: Path):
-    rows, cap = load_rows(stats_csv)
+    rows, cap, total_work = load_rows(stats_csv)
+    total_gates = int(total_work) if total_work else TOTAL_GATES
     plottable = [r for r in rows if r["time"] is not None and r["total_elems"] is not None]
     if not plottable:
         return 0, False
@@ -191,12 +196,12 @@ def render(stats_csv: Path, summary_json: Path | None, out: Path):
     ax.set_ylabel("Total tensor elements")
     ax.legend(loc="lower left", fontsize=8)
 
-    work_pct = 100.0 * last_work / TOTAL_GATES
+    work_pct = 100.0 * last_work / total_gates
     header_bits = [
         stats_csv.parent.name,
         f"cycle {cycle}",
         f"{last_time:.0f}s",
-        f"work {int(last_work)}/{TOTAL_GATES} ({work_pct:.1f}%)",
+        f"work {int(last_work)}/{total_gates} ({work_pct:.1f}%)",
     ]
     if cutoff is not None:
         header_bits.append(f"cutoff {cutoff:g}")
