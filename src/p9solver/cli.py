@@ -304,6 +304,12 @@ def build_parser():
     parser.add_argument("--cutoff", type=float, default=0.0006)
     parser.add_argument("--unswap-threshold", type=float, default=500000.0)
     parser.add_argument("--center-ratio", type=parse_center, default=0.5)
+    parser.add_argument(
+        "--staged-transpilation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Route only the two center-adjacent quarters before activating raw outer chunks.",
+    )
     parser.add_argument("--max-its", type=int, default=20)
     parser.add_argument("--sabre-trials", type=int, default=90)
     parser.add_argument("--post-sabre-trials", type=int, default=50)
@@ -513,8 +519,8 @@ def build_parser():
         default=2,
         help=(
             "Stop cleanly after this many consecutive unswap cycles consume "
-            "zero work gates. The error message recommends an alternate "
-            "cutoff (see BENCHMARKS.md). Use a "
+            "zero work gates. If this trips at cutoff 0.0006, rerun the same "
+            "command with --cutoff 0.001 first. Use a "
             "negative value to disable this fail-fast guardrail."
         ),
     )
@@ -802,6 +808,7 @@ def main(argv=None):
     compression_started = time.perf_counter()
     mpo, layers_left, layers_right, stats = mpo_compress_unswap(
         circuit,
+        staged_transpilation=args.staged_transpilation,
         max_bond=args.max_bond,
         cutoff=args.cutoff,
         unswap_threshold=args.unswap_threshold,

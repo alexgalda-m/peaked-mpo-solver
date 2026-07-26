@@ -26,15 +26,22 @@ IGNORED_WORK_OPS = {"swap", "measure", "barrier", "delay"}
 # ------------------------------------------------------------------
 #  Rewiring
 # ------------------------------------------------------------------
-from qiskit.transpiler.passes import ElidePermutations, SabreSwap
+from qiskit.transpiler.passes import SabreSwap
+try:
+    from qiskit.transpiler.passes import ElidePermutations
+except ImportError:  # Qiskit < 1.0
+    ElidePermutations = None
 from qiskit.transpiler import CouplingMap
 
 def rewire_layers(ls, perm, seed=None, sabre_trials=10000, sabre_heuristic="decay"):
     nq = len(perm)
     qc = merge_layers(ls)
-    qc = QuantumCircuit(nq).compose(qc, qubits=np.argsort(perm))
+    # Preserve the compact measurement frame across rewiring. The staged outer
+    # chunks inherit this frame when they are activated at the inner boundary.
+    qc = QuantumCircuit(nq, qc.num_clbits).compose(qc, qubits=np.argsort(perm))
 
-    qc = ElidePermutations()(qc)
+    if ElidePermutations is not None:
+        qc = ElidePermutations()(qc)
     ss = SabreSwap(
         coupling_map=CouplingMap.from_line(ls[0].num_qubits),
         heuristic=sabre_heuristic,
@@ -1355,6 +1362,7 @@ def mpo_compress_unswap(
     unswap_alignment_protect_gain=None,
     unswap_alignment_max_replacements=None,
     unswap_alignment_tie_loss=1.0,
+    staged_transpilation=False,
 ):
     if swap_gate_representation == "current":
         routed_swap_representation = "block"
@@ -1380,20 +1388,46 @@ def mpo_compress_unswap(
         C = int(len(circuit) * center_ratio)
     elif type(center_ratio) is int:
         C = center_ratio
-    circuit_left = merge_gates(circuit[:C], circuit.num_qubits).inverse()
-    circuit_right = merge_gates(circuit[C:], circuit.num_qubits)
+    pending_outer_left = None
+    pending_outer_right = None
+    if staged_transpilation:
+        left_split = C // 2
+        right_split = C + (len(circuit) - C) // 2
+        # The two outer chunks stay raw until both initial center fronts have
+        # drained. The left chunk is inverted because it is absorbed from the
+        # midpoint's left side.
+        pending_outer_left = merge_gates(
+            circuit[:left_split], circuit.num_qubits
+        ).inverse()
+        pending_outer_right = merge_gates(
+            circuit[right_split:], circuit.num_qubits
+        )
+        circuit_left = merge_gates(
+            circuit[left_split:C], circuit.num_qubits
+        ).inverse()
+        circuit_right = merge_gates(
+            circuit[C:right_split], circuit.num_qubits
+        )
+        logging.info(
+            "Staged transpilation: inner=[%s:%s)|[%s:%s), outer=[0:%s)|[%s:%s)",
+            left_split, C, C, right_split, left_split, right_split, len(circuit),
+        )
+    else:
+        circuit_left = merge_gates(circuit[:C], circuit.num_qubits).inverse()
+        circuit_right = merge_gates(circuit[C:], circuit.num_qubits)
     if "measure" not in circuit_right.count_ops():
-        circuit_right.measure_all()
+        circuit_right.measure_all(add_bits=False)
     if "measure" not in circuit_left.count_ops():
-        circuit_left.measure_all()
+        circuit_left.measure_all(add_bits=False)
 
     layers_left = list(iter_layers(circuit_left))
     layers_right = list(iter_layers(circuit_right))
 
 
     T_U = count_work_ops(circuit)
-    T_UL = count_work_ops(circuit_left)
-    T_UR = count_work_ops(circuit_right)
+    # Report total logical work, not just the initially active inner chunks.
+    T_UL = count_work_ops(merge_gates(circuit[:C], circuit.num_qubits))
+    T_UR = count_work_ops(merge_gates(circuit[C:], circuit.num_qubits))
 
     logging.info(f"Total unitaries: {T_U} = {T_UL} (left) + {T_UR} (right)")
 
@@ -1552,10 +1586,40 @@ def mpo_compress_unswap(
         timing_totals["initial_rewire_time_s"] += rewire_time_s
         stats_data.append(row)
     timing_totals["initial_rewire_wall_time_s"] += time.perf_counter() - initial_rewire_wall_started
-    init_meas = layers_left[-2:]
-    layers_left = layers_left[:-2]
-    final_meas = layers_right[-2:]
-    layers_right = layers_right[:-2]
+    def split_measurement_tail(routed_layers):
+        """Separate all trailing barrier/measurement layers from routed work."""
+        split_at = len(routed_layers)
+        while split_at:
+            names = set(routed_layers[split_at - 1].count_ops())
+            if names and names <= {"measure", "barrier"}:
+                split_at -= 1
+            else:
+                break
+        if split_at == len(routed_layers):
+            raise ValueError("routed chunk has no trailing measurement layers")
+        return routed_layers[:split_at], routed_layers[split_at:]
+
+    def measurement_permutation(measurement_layers):
+        """Return logical-bit order mapped to current physical sites."""
+        mapping = {}
+        for layer in measurement_layers:
+            for instruction in layer.data:
+                if instruction.operation.name == "measure":
+                    classical = layer.find_bit(instruction.clbits[0]).index
+                    site = layer.find_bit(instruction.qubits[0]).index
+                    mapping[classical] = site
+        measured_bits = sorted(mapping)
+        if len(measured_bits) != circuit.num_qubits:
+            raise ValueError(
+                "trailing measurement layers do not cover every logical bit: "
+                f"have={measured_bits} expected_count={circuit.num_qubits}"
+            )
+        return [mapping[index] for index in measured_bits]
+
+    init_meas = None
+    final_meas = None
+    layers_left, init_meas = split_measurement_tail(layers_left)
+    layers_right, final_meas = split_measurement_tail(layers_right)
 
     # Start the MPO and counters
     ii_left = 0
@@ -1576,10 +1640,61 @@ def mpo_compress_unswap(
     cycle_start_total_elems = elem_counts(mpo_core)
     termination_reason = "completed"
     termination_detail = None
+    forced_work_remaining = 0
+    forced_layer_remaining = 0
+
+    def activate_outer_chunks():
+        """Route the raw outer chunks using the maps at the inner boundary."""
+        nonlocal layers_left, layers_right, init_meas, final_meas
+        nonlocal pending_outer_left, pending_outer_right, ii_left, ii_right
+        left_input = pending_outer_left.copy()
+        right_input = pending_outer_right.copy()
+        left_input.measure_all(add_bits=False)
+        right_input.measure_all(add_bits=False)
+        left_perm = np.argsort(measurement_permutation(init_meas))
+        right_perm = np.argsort(measurement_permutation(final_meas))
+        layers_left = rewire_layers(
+            list(iter_layers(left_input)), left_perm, seed=post_rewire_seed,
+            sabre_trials=post_rewire_sabre_trials, sabre_heuristic=sabre_heuristic,
+        )
+        layers_right = rewire_layers(
+            list(iter_layers(right_input)), right_perm, seed=post_rewire_seed,
+            sabre_trials=post_rewire_sabre_trials, sabre_heuristic=sabre_heuristic,
+        )
+        layers_left, init_meas = split_measurement_tail(layers_left)
+        layers_right, final_meas = split_measurement_tail(layers_right)
+        pending_outer_left = None
+        pending_outer_right = None
+        ii_left = 0
+        ii_right = 0
+        row = {
+            "time": time.perf_counter() - t0,
+            "stage": "staged_outer_activated",
+            "left_layers": len(layers_left),
+            "right_layers": len(layers_right),
+            "u_consumed_total": total_u_consumed,
+            **get_tn_info(mpo_core),
+        }
+        stats_data.append(row)
+        if on_stats is not None:
+            on_stats(row)
+        logging.info("[staged outer activated] -> %s", row)
 
     # Start loop
     probe_executor = ThreadPoolExecutor(max_workers=2) if parallel_absorb_probes else None
-    while ii_left < len(layers_left) or ii_right < len(layers_right):
+    while (
+        ii_left < len(layers_left)
+        or ii_right < len(layers_right)
+        or pending_outer_left is not None
+        or pending_outer_right is not None
+    ):
+        if (
+            ii_left >= len(layers_left)
+            and ii_right >= len(layers_right)
+            and pending_outer_left is not None
+            and pending_outer_right is not None
+        ):
+            activate_outer_chunks()
         # Try both sides to see which one results in a smaller size
         def absorb_layer(mpo, side, left_index, right_index):
             if side == "L":
@@ -1744,14 +1859,37 @@ def mpo_compress_unswap(
             elif (ii_right + ii_left) % flip_freq == 0:
                 do_left = not do_left
 
-        # Select the smallest one
+        forced_drain_active = (
+            forced_work_remaining > 0 and forced_layer_remaining > 0
+        )
+        if forced_drain_active:
+            def distance_to_next_work(layers, index):
+                for distance, layer in enumerate(layers[index:]):
+                    if count_work_ops(layer) > 0:
+                        return distance
+                return float("inf")
+
+            left_distance = distance_to_next_work(layers_left, ii_left)
+            right_distance = distance_to_next_work(layers_right, ii_right)
+            if left_distance != right_distance:
+                do_left = left_distance < right_distance
+            logging.info(
+                "[forced drain frontier] left_distance=%s right_distance=%s chosen=%s",
+                left_distance, right_distance, "left" if do_left else "right",
+            )
+
+        # Select the smallest one, except for a small forced drain after an
+        # ineffective unswap: rerouting can expose a safe nearby work layer.
         selected_counts = [counts_right, counts_left][int(do_left)]
         selected_max_bond = [max_bond_right, max_bond_left][int(do_left)]
         selected_absorbable = (
-            selected_counts < unswap_threshold
-            and (
-                unswap_trigger_max_bond is None
-                or selected_max_bond <= unswap_trigger_max_bond
+            forced_drain_active
+            or (
+                selected_counts < unswap_threshold
+                and (
+                    unswap_trigger_max_bond is None
+                    or selected_max_bond <= unswap_trigger_max_bond
+                )
             )
         )
         if selected_absorbable:
@@ -1781,6 +1919,17 @@ def mpo_compress_unswap(
                 # Log
                 side_chosen = "R"
                 ii_right += 1            
+
+            if forced_drain_active:
+                forced_layer_remaining = max(0, forced_layer_remaining - 1)
+                if new_us > 0:
+                    forced_work_remaining = max(0, forced_work_remaining - new_us)
+                if forced_layer_remaining == 0 and forced_work_remaining > 0:
+                    logging.warning(
+                        "[forced drain layer limit] returning to unswap with work_remaining=%s",
+                        forced_work_remaining,
+                    )
+                    forced_work_remaining = 0
             
             logging.info((f"[{ii_right}R/{len(layers_right)}]" if side_chosen == "R" else f"[{ii_left}L/{len(layers_left)}]") +
                          f"(swap: {new_swaps}, u: {new_us} | c_u: {current_u_consumed} | t_u_l: {total_u_consumed_left}/{T_UL} | t_u_r: {total_u_consumed_right}/{T_UR} | t_u: {total_u_consumed}/{T_U}) -> " +
@@ -1919,7 +2068,9 @@ def mpo_compress_unswap(
                     remaining_layers = layers_right[(ii_right):] + final_meas
                     perm = new_perm_right
 
-                cycle_route_candidates = route_candidates
+                cycle_route_candidates = (
+                    route_candidates if current_u_consumed == 0 else 1
+                )
                 cycle_route_score = route_score
                 cycle_route_seed = post_rewire_seed
 
@@ -1995,9 +2146,9 @@ def mpo_compress_unswap(
                 }
             else:
                 rewire_results = {}
-                if ii_left < len(layers_left):
+                if ii_left < len(layers_left) or pending_outer_left is not None:
                     rewire_results["left"] = rewire_remaining("left")
-                if ii_right < len(layers_right):
+                if ii_right < len(layers_right) or pending_outer_right is not None:
                     rewire_results["right"] = rewire_remaining("right")
             rewire_wall_time_s = time.perf_counter() - rewire_wall_started
             timing_totals["post_unswap_rewire_wall_time_s"] += rewire_wall_time_s
@@ -2009,8 +2160,7 @@ def mpo_compress_unswap(
                 stats_data.append(row)
                 if on_stats is not None:
                     on_stats(row)
-                init_meas = layers_left[-2:]
-                layers_left = layers_left[:-2]
+                layers_left, init_meas = split_measurement_tail(layers_left)
             else:
                 layers_left = []
 
@@ -2021,8 +2171,7 @@ def mpo_compress_unswap(
                 stats_data.append(row)
                 if on_stats is not None:
                     on_stats(row)
-                final_meas = layers_right[-2:]
-                layers_right = layers_right[:-2]
+                layers_right, final_meas = split_measurement_tail(layers_right)
             else:
                 layers_right = []
 
@@ -2054,6 +2203,8 @@ def mpo_compress_unswap(
             ii_right = 0
             if cycle_work_consumed == 0:
                 no_progress_unswap_cycles += 1
+                forced_work_remaining = max(forced_work_remaining, 1)
+                forced_layer_remaining = max(forced_layer_remaining, 8)
             else:
                 no_progress_unswap_cycles = 0
 
@@ -2116,6 +2267,7 @@ def mpo_compress_unswap(
                     f"consumed zero work gates at cutoff={cutoff} "
                     f"[mode={stall_mode}]. {remedy}"
                 )
+                suggested_cutoff = 0.001 if np.isclose(cutoff, 0.0006) else 0.0006
                 logging.error(
                     "aborting after %s consecutive no-progress unswap cycles "
                     "(limit=%s, consumed=%s/%s, cutoff=%s, mode=%s). %s",

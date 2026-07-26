@@ -35,6 +35,33 @@ The run writes `runs/p9/` with `summary.json`, `stats.csv`, `samples.tsv`,
 `plot.png`, `samples.png`, and `run.log`. Success is
 `matches_expected_bitstring: true` in `summary.json`.
 
+## Experimental staged center-out routing
+
+`--staged-transpilation` initially routes only P9's two center-adjacent
+chunks: `[471:942)` from the left (inverted) and `[942:1413)` from the right.
+The raw outer chunks `[0:471)` and `[1413:1885)` do not participate in this
+first routing pass. Once both inner fronts drain, the solver derives the
+current logical-to-site maps from their routed measurement tails, routes each
+outer chunk against those maps, and continues normal MPO compression.
+
+`stats.csv` records this auditable handoff as one `staged_outer_activated`
+row; for P9 it must have `u_consumed_total=942`. The handoff preserves the
+source circuit's 56-bit classical frame, so rewiring cannot create an
+ambiguous second measurement register.
+
+```bash
+uv run p9solve \
+  --qasm circ/peaked_circuit_P9_Hqap_56x1917.qasm \
+  --outdir runs --tag p9_staged --samples 1000 \
+  --cutoff 0.0006 --no-parallel-rewire --staged-transpilation
+```
+
+This is a routing experiment, not a universal acceleration. It can win when
+full-circuit initial routing inserts many edge-induced SWAPs or the center has
+a low-entanglement cancellation window. It can lose when the deferred reroutes
+or their boundary MPO compression cost more than those saved SWAPs. Compare
+only completed, bitstring-verified runs and their full timelines.
+
 The QASM has 1917 `rzz` + 3890 `u` gates; Qiskit's `Collect2qBlocks` +
 `ConsolidateBlocks` fuse these losslessly into 1885 generic 2q-unitary
 blocks, which is what progress lines (`[Cycle 1] 8/1885 gates …`) count.
