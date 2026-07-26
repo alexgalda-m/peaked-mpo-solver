@@ -62,6 +62,9 @@ a low-entanglement cancellation window. It can lose when the deferred reroutes
 or their boundary MPO compression cost more than those saved SWAPs. Compare
 only completed, bitstring-verified runs and their full timelines.
 
+The handoff design, audit conditions, and live validation checkpoint are in
+[`STAGED_TRANSPILATION.md`](STAGED_TRANSPILATION.md).
+
 The QASM has 1917 `rzz` + 3890 `u` gates; Qiskit's `Collect2qBlocks` +
 `ConsolidateBlocks` fuse these losslessly into 1885 generic 2q-unitary
 blocks, which is what progress lines (`[Cycle 1] 8/1885 gates …`) count.
