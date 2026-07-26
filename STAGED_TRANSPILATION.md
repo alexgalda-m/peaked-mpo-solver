@@ -41,8 +41,27 @@ The first durable staged run crossed the boundary at 4,124.08 seconds with:
 | deferred right routed layers | 919 |
 
 The run remained live after activation and had absorbed 1,035/1,885 work
-blocks at the checkpoint. This proves the staged handoff itself; it is not a
-claim of end-to-end correctness until the required final sampling check passes.
+blocks at the checkpoint.
+
+## Completed end-to-end validation (2026-07-25)
+
+The same run completed all 1,885 blocks, terminated with
+`termination_reason: completed`, and sampled the expected P9 bitstring:
+
+| field | value |
+|---|---:|
+| compression time | 6,808.42 s |
+| materialization + sampling | 20.92 s |
+| final MPO bond | 16 |
+| peak MPO bond | 512 |
+| peak tensor elements | 5,951,496 |
+| expected peak samples | 104 / 1,000 (10.4%) |
+| `matches_expected_bitstring` | `true` |
+
+The termination row reports 942 work blocks from the left and 943 from the
+right, totaling 1,885. Together with the single boundary event above, this
+proves that the initially untouched outer pieces were attached and completed
+without changing the predicted output distribution.
 
 ## When it can help
 
