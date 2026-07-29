@@ -369,6 +369,12 @@ def build_parser():
         help="Expected P9 peak bitstring. Use empty string to disable comparison.",
     )
     parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument(
+        "--numpy-seed",
+        type=int,
+        default=None,
+        help="Seed for stochastic unswap tie-breaks; defaults to --seed.",
+    )
     parser.add_argument("--max-bond", type=int, default=512)
     parser.add_argument("--cutoff", type=float, default=0.0006)
     parser.add_argument("--unswap-threshold", type=float, default=500000.0)
@@ -743,6 +749,9 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    # The unswap equal-bond tie-breaker uses NumPy's RNG.  Seed it alongside
+    # SABRE so --seed identifies the complete compression trajectory.
+    np.random.seed(args.seed if args.numpy_seed is None else args.numpy_seed)
     qasm_path = Path(args.qasm)
     tag = args.tag or qasm_path.stem
     outdir = Path(args.outdir) / tag
