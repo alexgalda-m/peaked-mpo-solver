@@ -15,6 +15,30 @@ from autoray.autoray import backend_like
 from quimb.tensor import decomp
 from quimb.tensor import tensor_core
 
+_ACTIVE_TRACKER = None
+
+
+def capture_fid10_state():
+    """Capture telemetry before a speculative MPO operation."""
+    if _ACTIVE_TRACKER is None:
+        return None
+    return (
+        _ACTIVE_TRACKER.log10_retained,
+        _ACTIVE_TRACKER.events,
+        _ACTIVE_TRACKER.fallbacks,
+    )
+
+
+def restore_fid10_state(state):
+    """Restore telemetry after discarding a speculative MPO operation."""
+    if state is None or _ACTIVE_TRACKER is None:
+        return
+    (
+        _ACTIVE_TRACKER.log10_retained,
+        _ACTIVE_TRACKER.events,
+        _ACTIVE_TRACKER.fallbacks,
+    ) = state
+
 
 class TruncationFid10Tracker:
     """Track retained squared singular-value fractions across MPO splits."""
@@ -31,6 +55,7 @@ class TruncationFid10Tracker:
         return 10.0 ** self.log10_retained
 
     def install(self):
+        global _ACTIVE_TRACKER
         if self._original is not None:
             return self
         # ``tensor_compress_bond`` reaches Quimb's SVD implementation after
@@ -88,9 +113,13 @@ class TruncationFid10Tracker:
             return result
 
         tensor_core._SPLIT_FNS["svd"] = tracked_svd
+        _ACTIVE_TRACKER = self
         return self
 
     def uninstall(self):
+        global _ACTIVE_TRACKER
         if self._original is not None:
             tensor_core._SPLIT_FNS["svd"] = self._original
             self._original = None
+        if _ACTIVE_TRACKER is self:
+            _ACTIVE_TRACKER = None

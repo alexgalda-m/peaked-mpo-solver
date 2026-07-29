@@ -13,6 +13,7 @@ from qiskit import QuantumCircuit
 from concurrent.futures import ThreadPoolExecutor
 
 from p9solver.mpo import apply_circuit, apply_swaps, mpo_from_circuit
+from p9solver.retention import capture_fid10_state, restore_fid10_state
 
 from p9solver.qiskit_utils import iter_layers, merge_layers, elem_counts, merge_gates, get_tn_info
 
@@ -788,6 +789,7 @@ def get_good_swaps(
     selection_max_bond = probe_max_bond if probe_max_bond is not None else max_bond
     selection_cutoff = probe_cutoff if probe_cutoff is not None else cutoff
 
+    fid10_before_probe = capture_fid10_state()
     mpo_tmp = apply_swaps(
         mpo,
         swaps_l=swaps_l,
@@ -798,6 +800,10 @@ def get_good_swaps(
         method=swap_apply_method,
         swap_gate_representation=swap_gate_representation,
     )
+    fid10_after_probe = capture_fid10_state()
+    restore_fid10_state(fid10_before_probe)
+    if fid10_after_probe is not None:
+        mpo_tmp._p9_fid10_probe_state = fid10_after_probe
     new_bonds = get_bond_sizes(mpo_tmp)
     if equal is None:
         new_bonds = new_bonds + (np.random.rand(*new_bonds.shape)-0.5)
@@ -1159,6 +1165,9 @@ def unswap(
                         )
                         if can_reuse_full_probe:
                             mpo = full_probe_mpo
+                            restore_fid10_state(
+                                getattr(mpo, "_p9_fid10_probe_state", None)
+                            )
                         else:
                             mpo = apply_swaps(
                                 mpo,
@@ -1805,7 +1814,16 @@ def mpo_compress_unswap(
                 raise
 
         probe_wall_started = time.perf_counter()
-        if parallel_absorb_probes and ii_left < len(layers_left) and ii_right < len(layers_right):
+        fid10_before_absorb_probes = capture_fid10_state()
+        fid10_after_left_probe = fid10_before_absorb_probes
+        fid10_after_right_probe = fid10_before_absorb_probes
+        use_parallel_absorb_probes = (
+            parallel_absorb_probes
+            and fid10_before_absorb_probes is None
+            and ii_left < len(layers_left)
+            and ii_right < len(layers_right)
+        )
+        if use_parallel_absorb_probes:
             left_future = probe_executor.submit(probe_left)
             right_future = probe_executor.submit(probe_right)
             mpo_left, probe_left_time_s = left_future.result()
@@ -1817,6 +1835,8 @@ def mpo_compress_unswap(
         else:
             if ii_left < len(layers_left):
                 mpo_left, probe_left_time_s = probe_left()
+                fid10_after_left_probe = capture_fid10_state()
+                restore_fid10_state(fid10_before_absorb_probes)
                 counts_left = elem_counts(mpo_left)
                 max_bond_left = mpo_left.max_bond()
             else:
@@ -1827,6 +1847,8 @@ def mpo_compress_unswap(
 
             if ii_right < len(layers_right):
                 mpo_right, probe_right_time_s = probe_right()
+                fid10_after_right_probe = capture_fid10_state()
+                restore_fid10_state(fid10_before_absorb_probes)
                 counts_right = elem_counts(mpo_right)
                 max_bond_right = mpo_right.max_bond()
             else:
@@ -1953,6 +1975,9 @@ def mpo_compress_unswap(
             )
         )
         if selected_absorbable:
+            restore_fid10_state(
+                fid10_after_left_probe if do_left else fid10_after_right_probe
+            )
             if do_left:
                 mpo_core = mpo_left
                 # Update counts
@@ -2048,6 +2073,7 @@ def mpo_compress_unswap(
         
         # Unswap if both sides go over the size budget
         else: 
+            restore_fid10_state(fid10_before_absorb_probes)
             # Apply unswapping
             try:
                 unswap_started = time.perf_counter()
