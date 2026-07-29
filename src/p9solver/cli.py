@@ -13,6 +13,7 @@ import pickle
 import platform
 import re
 import sys
+import hashlib
 import time
 import warnings
 from pathlib import Path
@@ -71,7 +72,7 @@ def write_json(path, data):
     tmp_path.replace(path)
 
 
-def write_factor_bundle(path, mpo, layers_left, layers_right):
+def write_factor_bundle(path, mpo, layers_left, layers_right, factor_interface=None):
     """Atomically save the composition-grade core MPO plus residual layers.
 
     This mirrors the proven GPU ``mpo_dump.pkl`` artifact: an unfinished tail
@@ -86,11 +87,49 @@ def write_factor_bundle(path, mpo, layers_left, layers_right):
                 "layers_left": layers_left,
                 "layers_right": layers_right,
                 "virtual_tail_frames": getattr(mpo, "_p9_tail_virtual_frames", None),
+                "factor_interface": factor_interface,
             },
             handle,
             protocol=pickle.HIGHEST_PROTOCOL,
         )
     tmp_path.replace(path)
+
+
+def build_factor_interface(path, qasm_path, circuit, mpo, layers_left, layers_right):
+    """Load and validate the logical-leg contract for a saved MPO factor."""
+    interface = json.loads(Path(path).read_text())
+    qubit_count = circuit.num_qubits
+    logical_to_site = interface.get("original_logical_to_factor_site")
+    if not isinstance(logical_to_site, list) or sorted(logical_to_site) != list(range(qubit_count)):
+        raise ValueError(
+            "factor interface must provide a permutation original_logical_to_factor_site "
+            f"of 0..{qubit_count - 1}"
+        )
+    site_to_logical = [None] * qubit_count
+    for logical, site in enumerate(logical_to_site):
+        site_to_logical[site] = logical
+    interface.update(
+        {
+            "schema_version": "p9solver.factor-interface.v1",
+            "qubit_count": qubit_count,
+            "qasm_filename": qasm_path.name,
+            "qasm_sha256": hashlib.sha256(qasm_path.read_bytes()).hexdigest(),
+            "factor_site_to_original_logical": site_to_logical,
+            "mpo_site_order": list(range(qubit_count)),
+            "input_frame": list(range(qubit_count)),
+            "virtual_tail_frame_convention": (
+                "frame[output_factor_site] = input_factor_site; apply each saved "
+                "left/right tail frame at its named boundary, never as a generic gate MPO"
+            ),
+            "virtual_tail_frames": getattr(mpo, "_p9_tail_virtual_frames", None),
+            "residual_layers": {
+                "left": [dict(layer.count_ops()) for layer in layers_left],
+                "right": [dict(layer.count_ops()) for layer in layers_right],
+                "composition_action": "strip barriers and measurements; no residual unitary work gates",
+            },
+        }
+    )
+    return interface
 
 
 def sanitize_local_metadata(value):
@@ -668,6 +707,14 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--factor-interface-json",
+        type=Path,
+        help=(
+            "JSON contract mapping original logical qubits to factor MPO sites. "
+            "When used with --save-mpo, embeds and writes a composition manifest."
+        ),
+    )
+    parser.add_argument(
         "--plots",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -966,14 +1013,25 @@ def main(argv=None):
         },
     )
 
+    factor_interface = None
+    if args.factor_interface_json:
+        factor_interface = build_factor_interface(
+            args.factor_interface_json, qasm_path, circuit, mpo, layers_left, layers_right
+        )
+        write_json(outdir / "factor_interface.json", factor_interface)
+
     if args.save_mpo:
-        write_factor_bundle(outdir / "mpo_dump.pkl", mpo, layers_left, layers_right)
+        write_factor_bundle(
+            outdir / "mpo_dump.pkl", mpo, layers_left, layers_right, factor_interface
+        )
         summary["factor_bundle_path"] = "mpo_dump.pkl"
         summary["factor_bundle_saved"] = True
         summary["factor_bundle_remaining_work_gates"] = remaining_work_gates
         summary["factor_bundle_virtual_tail_frames"] = getattr(
             mpo, "_p9_tail_virtual_frames", None
         )
+        if factor_interface is not None:
+            summary["factor_interface_path"] = "factor_interface.json"
 
     expected = args.expected_bitstring or None
     terminal_reason = summary.get("termination_reason")
