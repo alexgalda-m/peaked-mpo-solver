@@ -19,11 +19,12 @@ from quimb.tensor import tensor_core
 class TruncationFid10Tracker:
     """Track retained squared singular-value fractions across MPO splits."""
 
-    def __init__(self):
+    def __init__(self, svd_driver="native"):
         self.log10_retained = 0.0
         self.events = 0
         self.fallbacks = 0
         self._original = None
+        self.svd_driver = svd_driver
 
     @property
     def retained_fraction(self):
@@ -49,19 +50,19 @@ class TruncationFid10Tracker:
             absorb_code = decomp._ABSORB_MAP[absorb]
             with backend_like(backend):
                 try:
-                    # Use LAPACK's classical gesvd by default on the laptop.
-                    # It is slower than Accelerate's divide-and-conquer path,
-                    # but materially more reliable for these ill-conditioned
-                    # MPO compressions.
-                    U, s, VH = scipy_linalg.svd(
-                        np.asarray(x),
-                        full_matrices=False,
-                        check_finite=False,
-                        lapack_driver="gesvd",
-                    )
+                    if tracker.svd_driver == "native":
+                        # Preserve Quimb's exact production path. On this
+                        # laptop NumPy dispatches to Apple Accelerate LAPACK.
+                        U, s, VH = do("linalg.svd", x)
+                    else:
+                        U, s, VH = scipy_linalg.svd(
+                            np.asarray(x),
+                            full_matrices=False,
+                            check_finite=False,
+                            lapack_driver="gesvd",
+                        )
                 except np.linalg.LinAlgError:
-                    # Preserve the same algorithm, promoting precision only
-                    # for a non-convergent complex64 decomposition.
+                    # Classical gesvd remains the convergence fallback.
                     U, s, VH = scipy_linalg.svd(
                         np.asarray(x, dtype=np.complex128),
                         full_matrices=False,

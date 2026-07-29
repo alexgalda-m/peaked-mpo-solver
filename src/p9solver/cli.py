@@ -364,6 +364,16 @@ def build_parser():
         help="Record retained-spectrum fid10 from the solver's existing SVDs.",
     )
     parser.add_argument(
+        "--fid10-svd-driver",
+        choices=("native", "gesvd"),
+        default="native",
+        help=(
+            "SVD kernel used by the in-place fid10 tracker. Native preserves "
+            "Quimb's NumPy/Accelerate production path; gesvd is the classical "
+            "SciPy LAPACK variant."
+        ),
+    )
+    parser.add_argument(
         "--expected-bitstring",
         default=DEFAULT_EXPECTED_P9,
         help="Expected P9 peak bitstring. Use empty string to disable comparison.",
@@ -791,7 +801,11 @@ def main(argv=None):
     )
 
     stats_live = []
-    fid10_tracker = TruncationFid10Tracker().install() if args.track_fid10 else None
+    fid10_tracker = (
+        TruncationFid10Tracker(args.fid10_svd_driver).install()
+        if args.track_fid10
+        else None
+    )
     compression_started = None
     plot_state = {
         "last_live_refresh": 0.0,
