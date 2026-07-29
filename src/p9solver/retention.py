@@ -53,7 +53,9 @@ class TruncationFid10Tracker:
                     if tracker.svd_driver == "native":
                         # Preserve Quimb's exact production path. On this
                         # laptop NumPy dispatches to Apple Accelerate LAPACK.
-                        U, s, VH = do("linalg.svd", x)
+                        U, s, VH = do(
+                            "linalg.svd", x, full_matrices=False
+                        )
                     else:
                         U, s, VH = scipy_linalg.svd(
                             np.asarray(x),
@@ -61,7 +63,7 @@ class TruncationFid10Tracker:
                             check_finite=False,
                             lapack_driver="gesvd",
                         )
-                except np.linalg.LinAlgError:
+                except (np.linalg.LinAlgError, ValueError):
                     # Classical gesvd remains the convergence fallback.
                     U, s, VH = scipy_linalg.svd(
                         np.asarray(x, dtype=np.complex128),
