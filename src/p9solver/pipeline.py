@@ -1322,6 +1322,8 @@ def mpo_compress_unswap(
     max_unswap_cycles=None,
     max_work_gates=None,
     abort_after_no_progress_unswap_cycles=2,
+    force_absorb_tail_gates=0,
+    virtualize_tail_swaps=False,
     unswap_stop_total_elems=None,
     unswap_stop_max_bond=None,
     unswap_probe_max_bond=None,
@@ -1642,6 +1644,35 @@ def mpo_compress_unswap(
     termination_detail = None
     forced_work_remaining = 0
     forced_layer_remaining = 0
+    tail_virtualized = False
+    tail_virtual_frames = None
+
+    def virtualize_tail_layers(layers):
+        """Elide routed SWAPs and retain the resulting boundary frame.
+
+        This is the local analogue of the GPU ``as_perm`` tail path: logical
+        work gates remain in the MPO path while routed permutation scaffolding
+        is represented by an explicit wire frame rather than tensor products.
+        """
+        if not layers:
+            return [], list(range(circuit.num_qubits))
+        if ElidePermutations is None:
+            raise RuntimeError("virtual tail requires Qiskit ElidePermutations")
+        merged = merge_layers(layers)
+        witness = QuantumCircuit(circuit.num_qubits, circuit.num_qubits)
+        witness.compose(merged, inplace=True)
+        witness.measure(range(circuit.num_qubits), range(circuit.num_qubits))
+        elided_witness = ElidePermutations()(witness)
+        frame = [None] * circuit.num_qubits
+        for instruction in elided_witness.data:
+            if instruction.operation.name == "measure":
+                frame[instruction.clbits[0]._index] = instruction.qubits[0]._index
+        if any(item is None for item in frame):
+            raise RuntimeError("virtual tail could not recover its output frame")
+        elided = ElidePermutations()(merged)
+        if elided.count_ops().get("swap", 0):
+            raise RuntimeError("virtual tail still contains routed SWAPs")
+        return list(iter_layers(elided)), frame
 
     def activate_outer_chunks():
         """Route the raw outer chunks using the maps at the inner boundary."""
@@ -1695,6 +1726,35 @@ def mpo_compress_unswap(
             and pending_outer_right is not None
         ):
             activate_outer_chunks()
+        remaining_work_gates = T_U - total_u_consumed
+        if (
+            force_absorb_tail_gates > 0
+            and remaining_work_gates > 0
+            and remaining_work_gates <= force_absorb_tail_gates
+        ):
+            if virtualize_tail_swaps and not tail_virtualized:
+                left_tail, left_frame = virtualize_tail_layers(layers_left[ii_left:])
+                right_tail, right_frame = virtualize_tail_layers(layers_right[ii_right:])
+                layers_left = layers_left[:ii_left] + left_tail
+                layers_right = layers_right[:ii_right] + right_tail
+                tail_virtual_frames = {
+                    "left_output_frame": left_frame,
+                    "right_output_frame": right_frame,
+                }
+                # Preserve the explicit frame with the MPO bundle for later
+                # composition; the tensor itself no longer carries swaps.
+                mpo_core._p9_tail_virtual_frames = tail_virtual_frames
+                tail_virtualized = True
+                logging.info("[virtual tail] elided routed SWAPs; frames=%s", tail_virtual_frames)
+            # GPU tail-drain mode: once only a small residue remains, absorb
+            # it directly into the MPO instead of restarting another unswap
+            # cycle. Keep the full layer budget so zero-work routing layers
+            # cannot prematurely end the drain.
+            forced_work_remaining = remaining_work_gates
+            forced_layer_remaining = max(
+                forced_layer_remaining,
+                (len(layers_left) - ii_left) + (len(layers_right) - ii_right),
+            )
         # Try both sides to see which one results in a smaller size
         def absorb_layer(mpo, side, left_index, right_index):
             if side == "L":
@@ -1920,6 +1980,12 @@ def mpo_compress_unswap(
                 side_chosen = "R"
                 ii_right += 1            
 
+            if tail_virtual_frames is not None:
+                # MPO application returns a fresh object, so preserve the
+                # explicit virtual-routing boundary frame across every tail
+                # absorption before the final factor bundle is serialized.
+                mpo_core._p9_tail_virtual_frames = tail_virtual_frames
+
             if forced_drain_active:
                 forced_layer_remaining = max(0, forced_layer_remaining - 1)
                 if new_us > 0:
@@ -1957,6 +2023,7 @@ def mpo_compress_unswap(
                                 "unswap_trigger_max_bond": unswap_trigger_max_bond,
                                 "cycle_start_total_elems": cycle_start_total_elems,
                                 "no_progress_unswap_cycles": no_progress_unswap_cycles,
+                                "tail_virtual_swaps": tail_virtualized,
                                 "absorb_score_mode": absorb_score,
                                 "probe_left_score": score_absorb_candidate(mpo_left, absorb_score) if mpo_left is not None else None,
                                 "probe_right_score": score_absorb_candidate(mpo_right, absorb_score) if mpo_right is not None else None,

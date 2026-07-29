@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import os
+import pickle
 import platform
 import re
 import sys
@@ -24,6 +25,7 @@ from qiskit.transpiler import PassManager
 from qiskit.transpiler.passes import Collect2qBlocks, ConsolidateBlocks
 
 from p9solver.pipeline import mpo_compress_unswap, mpo_to_mps
+from p9solver.retention import TruncationFid10Tracker
 
 
 DEFAULT_EXPECTED_P9 = (
@@ -66,6 +68,28 @@ def write_json(path, data):
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     with tmp_path.open("w") as handle:
         json.dump(data, handle, indent=2, default=str)
+    tmp_path.replace(path)
+
+
+def write_factor_bundle(path, mpo, layers_left, layers_right):
+    """Atomically save the composition-grade core MPO plus residual layers.
+
+    This mirrors the proven GPU ``mpo_dump.pkl`` artifact: an unfinished tail
+    is represented exactly as left/right layer lists, rather than silently
+    discarded or forced through an unrelated truncation path.
+    """
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("wb") as handle:
+        pickle.dump(
+            {
+                "mpo": mpo,
+                "layers_left": layers_left,
+                "layers_right": layers_right,
+                "virtual_tail_frames": getattr(mpo, "_p9_tail_virtual_frames", None),
+            },
+            handle,
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
     tmp_path.replace(path)
 
 
@@ -294,6 +318,12 @@ def build_parser():
     parser.add_argument("--outdir", default="runs", help="Directory for outputs.")
     parser.add_argument("--tag", default=None, help="Run name under --outdir.")
     parser.add_argument("--samples", type=int, default=1000)
+    parser.add_argument(
+        "--track-fid10",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Record retained-spectrum fid10 from the solver's existing SVDs.",
+    )
     parser.add_argument(
         "--expected-bitstring",
         default=DEFAULT_EXPECTED_P9,
@@ -525,6 +555,23 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--force-absorb-tail-gates",
+        type=int,
+        default=0,
+        help=(
+            "When this many or fewer work gates remain, bypass further "
+            "unswapping and directly absorb the residual layers into the MPO."
+        ),
+    )
+    parser.add_argument(
+        "--virtualize-tail-swaps",
+        action="store_true",
+        help=(
+            "For direct tail absorption, store routed SWAPs as explicit "
+            "permutation frames instead of multiplying them into the MPO."
+        ),
+    )
+    parser.add_argument(
         "--parallel-absorb-probes",
         action="store_true",
         help="Probe left and right absorption candidates concurrently.",
@@ -613,6 +660,14 @@ def build_parser():
         help="Compress only. Full submissions should leave sampling enabled.",
     )
     parser.add_argument(
+        "--save-mpo",
+        action="store_true",
+        help=(
+            "Serialize mpo_dump.pkl containing the final MPO and any residual "
+            "left/right layers, matching the GPU factor artifact."
+        ),
+    )
+    parser.add_argument(
         "--plots",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -680,6 +735,7 @@ def main(argv=None):
     )
 
     stats_live = []
+    fid10_tracker = TruncationFid10Tracker().install() if args.track_fid10 else None
     compression_started = None
     plot_state = {
         "last_live_refresh": 0.0,
@@ -775,6 +831,14 @@ def main(argv=None):
                 plot_state["warned_samples"] = True
 
     def handle_live_stats(row):
+        row["fid10"] = (
+            fid10_tracker.log10_retained if fid10_tracker is not None else None
+        )
+        row["fid10_retained_fraction"] = (
+            fid10_tracker.retained_fraction if fid10_tracker is not None else None
+        )
+        row["fid10_svd_events"] = fid10_tracker.events if fid10_tracker is not None else 0
+        row["fid10_svd_fallbacks"] = fid10_tracker.fallbacks if fid10_tracker is not None else 0
         stats_live.append(row)
         if row.get("stage") == "termination":
             write_partial_summary("terminated")
@@ -833,6 +897,8 @@ def main(argv=None):
             and args.abort_after_no_progress_unswap_cycles < 0
             else args.abort_after_no_progress_unswap_cycles
         ),
+        force_absorb_tail_gates=args.force_absorb_tail_gates,
+        virtualize_tail_swaps=args.virtualize_tail_swaps,
         absorb_score=args.absorb_score,
         parallel_absorb_probes=args.parallel_absorb_probes,
         parallel_rewire=args.parallel_rewire,
@@ -872,11 +938,14 @@ def main(argv=None):
         unswap_alignment_max_replacements=args.unswap_alignment_max_replacements,
         unswap_alignment_tie_loss=args.unswap_alignment_tie_loss,
     )
+    if fid10_tracker is not None:
+        fid10_tracker.uninstall()
     compress_time = time.perf_counter() - compression_started
 
     write_rows_csv(stats, outdir / "stats.csv")
     write_json(outdir / "stats.json", stats)
 
+    remaining_work_gates = int(last_value(stats, "remaining_work_gates") or 0)
     summary = make_summary(
         qasm_path=qasm_path,
         tag=tag,
@@ -891,10 +960,20 @@ def main(argv=None):
             "partial": False,
             "leftover_left_layers": len(layers_left),
             "leftover_right_layers": len(layers_right),
+            "remaining_work_gates": remaining_work_gates,
             "final_max_bond": mpo.max_bond(),
             "final_total_elems": last_value(stats, "total_elems"),
         },
     )
+
+    if args.save_mpo:
+        write_factor_bundle(outdir / "mpo_dump.pkl", mpo, layers_left, layers_right)
+        summary["factor_bundle_path"] = "mpo_dump.pkl"
+        summary["factor_bundle_saved"] = True
+        summary["factor_bundle_remaining_work_gates"] = remaining_work_gates
+        summary["factor_bundle_virtual_tail_frames"] = getattr(
+            mpo, "_p9_tail_virtual_frames", None
+        )
 
     expected = args.expected_bitstring or None
     terminal_reason = summary.get("termination_reason")
