@@ -723,6 +723,23 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--seed-mpo",
+        default=None,
+        help="Seed the absorption with a saved factor MPO instead of the identity "
+             "(pipeline already supports mpo_core; this exposes it). The bundle must "
+             "be a STRICT CHAIN — factors built with --virtualize-tail-swaps carry "
+             "dim-2 long-range bonds that make every downstream sweep cost "
+             "2^(bonds crossing a cut).",
+    )
+    parser.add_argument(
+        "--seed-absorb-mpo",
+        default=None,
+        help="Comma-separated bundles absorbed into the seeded core BEFORE the loop, "
+             "e.g. 'left=m0.pkl,right=m1.pkl'. Each join is followed by the normal "
+             "unswap cycles, so the combined object gets compressed rather than "
+             "merely truncated.",
+    )
+    parser.add_argument(
         "--factor-interface-json",
         type=Path,
         help=(
@@ -940,8 +957,61 @@ def main(argv=None):
             maybe_render_live_plot(force=True)
 
     compression_started = time.perf_counter()
+    seeded_core = None
+    if args.seed_mpo:
+        import pickle as _pk
+        _b = _pk.load(open(args.seed_mpo, "rb"))
+        seeded_core = _b["mpo"] if isinstance(_b, dict) and "mpo" in _b else _b
+        seeded_core.fuse_multibonds_()
+        _lr = sum(
+            1
+            for ix in seeded_core.ind_map
+            if len({i for i in range(seeded_core.L) if ix in seeded_core[i].inds}) == 2
+            and max(i for i in range(seeded_core.L) if ix in seeded_core[i].inds)
+            - min(i for i in range(seeded_core.L) if ix in seeded_core[i].inds) > 1
+        )
+        logging.info(
+            "[seed] core from %s: bond=%d long_range=%d",
+            args.seed_mpo, seeded_core.max_bond(), _lr,
+        )
+        if _lr:
+            logging.warning(
+                "[seed] core has %d long-range bonds; sweeps will cost 2^crossings. "
+                "Rebuild the factor without --virtualize-tail-swaps.", _lr
+            )
+        if args.seed_absorb_mpo:
+            for _spec in args.seed_absorb_mpo.split(","):
+                _side, _, _path = _spec.partition("=")
+                _o = _pk.load(open(_path.strip(), "rb"))
+                _o = _o["mpo"] if isinstance(_o, dict) and "mpo" in _o else _o
+                _o.fuse_multibonds_()
+                logging.info("[seed] absorbing %s factor %s (bond=%d)",
+                             _side.strip(), _path.strip(), _o.max_bond())
+                seeded_core = _o.apply(
+                    seeded_core, compress=True,
+                    max_bond=args.max_bond, cutoff=args.cutoff,
+                )
+                logging.info("[seed] core after %s join: bond=%d",
+                             _side.strip(), seeded_core.max_bond())
+
+    seeded_frames = None
+    if args.seed_mpo:
+        def _bar(layers, n):
+            for qc in layers or ():
+                for inst in qc.data:
+                    if inst.operation.name == "barrier" and len(inst.qubits) == n:
+                        return [qc.find_bit(q).index for q in inst.qubits]
+            return None
+        _n = seeded_core.L
+        seeded_frames = {"L": _bar(_b.get("layers_left"), _n),
+                         "R": _bar(_b.get("layers_right"), _n)}
+        logging.info("[seed] core frames L=%s R=%s",
+                     seeded_frames["L"], seeded_frames["R"])
+
     mpo, layers_left, layers_right, stats = mpo_compress_unswap(
         circuit,
+        mpo_core=seeded_core,
+        mpo_core_frames=seeded_frames,
         staged_transpilation=args.staged_transpilation,
         max_bond=args.max_bond,
         cutoff=args.cutoff,

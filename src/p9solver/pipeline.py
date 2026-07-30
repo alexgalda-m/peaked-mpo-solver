@@ -1323,6 +1323,7 @@ def mpo_compress_unswap(
     seed=None,
     hows=("both", "left", "right"),
     mpo_core=None,
+    mpo_core_frames=None,
     sabre_trials=10000,
     post_sabre_trials=None,
     post_sabre_seed=None,
@@ -1531,9 +1532,20 @@ def mpo_compress_unswap(
             parallel_rewire,
         )
         rewire_started = time.perf_counter()
+        # A seeded core carries its own routing frames; starting from the
+        # identity here silently misaligns the absorbed layers against it,
+        # which is what makes a framed core come out orthogonal. Left layers
+        # attach to the core's input side, right layers to its output side.
+        _start = np.arange(circuit.num_qubits, dtype=int)
+        if mpo_core_frames:
+            _f = mpo_core_frames.get("L" if side == "left" else "R")
+            if _f is not None:
+                # match the staged-outer path, which passes argsort of the
+                # frame (rewire_layers itself argsorts again when composing)
+                _start = np.argsort(np.asarray(_f, dtype=int))
         routed_layers = rewire_layers(
             layers,
-            np.arange(circuit.num_qubits, dtype=int),
+            _start,
             seed=seed,
             sabre_trials=sabre_trials,
             sabre_heuristic=sabre_heuristic,
