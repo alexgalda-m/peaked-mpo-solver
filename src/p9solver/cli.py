@@ -1003,8 +1003,20 @@ def main(argv=None):
                         return [qc.find_bit(q).index for q in inst.qubits]
             return None
         _n = seeded_core.L
-        seeded_frames = {"L": _bar(_b.get("layers_left"), _n),
-                         "R": _bar(_b.get("layers_right"), _n)}
+        _L, _R = _bar(_b.get("layers_left"), _n), _bar(_b.get("layers_right"), _n)
+        _vtf = _b.get("virtual_tail_frames") if isinstance(_b, dict) else None
+        if _vtf:
+            # A --virtualize-tail-swaps factor obeys a different contract:
+            # upper = identity, lower = lof . L, where lof is the recorded
+            # left_output_frame. Handing the strict (R, L) reading to the
+            # rewire misaligns it exactly as an unframed core would be.
+            _lof = _vtf.get("left_output_frame") or list(range(_n))
+            if _L is not None:
+                _L = [_lof[x] for x in _L]
+            _R = list(range(_n))
+            logging.info("[seed] vperm core: using identity output frame and "
+                         "lof-composed input frame")
+        seeded_frames = {"L": _L, "R": _R}
         logging.info("[seed] core frames L=%s R=%s",
                      seeded_frames["L"], seeded_frames["R"])
 
