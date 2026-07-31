@@ -396,6 +396,17 @@ def build_parser():
         help="Route only the two center-adjacent quarters before activating raw outer chunks.",
     )
     parser.add_argument(
+        "--forced-drain-by-cost",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "When a forced drain has live work on both sides, pick the cheaper "
+            "side by probed element count instead of the nearer one. The drain "
+            "bypasses the normal cost guards, so choosing by proximity can absorb "
+            "an arbitrarily expensive gate when a cheap alternative exists."
+        ),
+    )
+    parser.add_argument(
         "--staged-activate-per-side",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -1099,6 +1110,7 @@ def main(argv=None):
         mpo_core_frames=seeded_frames,
         staged_transpilation=args.staged_transpilation,
         staged_activate_per_side=args.staged_activate_per_side,
+        forced_drain_by_cost=args.forced_drain_by_cost,
         max_bond=args.max_bond,
         cutoff=args.cutoff,
         unswap_threshold=args.unswap_threshold,

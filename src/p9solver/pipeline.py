@@ -1449,6 +1449,7 @@ def mpo_compress_unswap(
     unswap_alignment_tie_loss=1.0,
     staged_transpilation=False,
     staged_activate_per_side=False,
+    forced_drain_by_cost=False,
 ):
     if swap_gate_representation == "current":
         routed_swap_representation = "block"
@@ -2081,11 +2082,32 @@ def mpo_compress_unswap(
 
             left_distance = distance_to_next_work(layers_left, ii_left)
             right_distance = distance_to_next_work(layers_right, ii_right)
-            if left_distance != right_distance:
+            drain_rule = "distance"
+            if (
+                forced_drain_by_cost
+                and left_distance != float("inf")
+                and right_distance != float("inf")
+            ):
+                # Both sides can still make work progress, so the drain is free to
+                # take the cheaper one. Choosing by proximity here is what makes a
+                # drain expensive: with the guards bypassed the solver absorbs the
+                # nearest gate no matter what it costs. Measured on s2B_staged
+                # gate 274 -- left_distance=0, right_distance=2, chose left, kept
+                # 0.4969 of the weight with a live alternative two layers away.
+                # counts_* are the probed post-absorb element counts, and an
+                # exhausted side is already 1e20, so this never picks a dead side.
+                if counts_left != counts_right:
+                    do_left = counts_left < counts_right
+                    drain_rule = "cost"
+                elif left_distance != right_distance:
+                    do_left = left_distance < right_distance
+            elif left_distance != right_distance:
                 do_left = left_distance < right_distance
             logging.info(
-                "[forced drain frontier] left_distance=%s right_distance=%s chosen=%s",
-                left_distance, right_distance, "left" if do_left else "right",
+                "[forced drain frontier] left_distance=%s right_distance=%s "
+                "counts_left=%s counts_right=%s rule=%s chosen=%s",
+                left_distance, right_distance, counts_left, counts_right,
+                drain_rule, "left" if do_left else "right",
             )
 
         # Select the smallest one, except for a small forced drain after an
