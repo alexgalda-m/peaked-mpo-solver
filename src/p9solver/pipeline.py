@@ -1448,6 +1448,7 @@ def mpo_compress_unswap(
     unswap_alignment_max_replacements=None,
     unswap_alignment_tie_loss=1.0,
     staged_transpilation=False,
+    staged_activate_per_side=False,
 ):
     if swap_gate_representation == "current":
         routed_swap_representation = "block"
@@ -1768,30 +1769,59 @@ def mpo_compress_unswap(
             raise RuntimeError("virtual tail still contains routed SWAPs")
         return list(iter_layers(elided)), frame
 
-    def activate_outer_chunks():
-        """Route the raw outer chunks using the maps at the inner boundary."""
+    def activate_outer_side(side, emit_row=True):
+        """Route one raw outer chunk using the map at that side's inner boundary.
+
+        The two sides are independent: the left reads pending_outer_left through
+        init_meas, the right reads pending_outer_right through final_meas. They
+        are only activated together because the loop condition below waits for
+        both fronts, which starves whichever inner chunk empties first.
+        """
         nonlocal layers_left, layers_right, init_meas, final_meas
         nonlocal pending_outer_left, pending_outer_right, ii_left, ii_right
-        left_input = pending_outer_left.copy()
-        right_input = pending_outer_right.copy()
-        left_input.measure_all(add_bits=False)
-        right_input.measure_all(add_bits=False)
-        left_perm = np.argsort(measurement_permutation(init_meas))
-        right_perm = np.argsort(measurement_permutation(final_meas))
-        layers_left = rewire_layers(
-            list(iter_layers(left_input)), left_perm, seed=post_rewire_seed,
+        if side == "L":
+            chunk, meas = pending_outer_left.copy(), init_meas
+        else:
+            chunk, meas = pending_outer_right.copy(), final_meas
+        chunk.measure_all(add_bits=False)
+        perm = np.argsort(measurement_permutation(meas))
+        routed = rewire_layers(
+            list(iter_layers(chunk)), perm, seed=post_rewire_seed,
             sabre_trials=post_rewire_sabre_trials, sabre_heuristic=sabre_heuristic,
         )
-        layers_right = rewire_layers(
-            list(iter_layers(right_input)), right_perm, seed=post_rewire_seed,
-            sabre_trials=post_rewire_sabre_trials, sabre_heuristic=sabre_heuristic,
-        )
-        layers_left, init_meas = split_measurement_tail(layers_left)
-        layers_right, final_meas = split_measurement_tail(layers_right)
-        pending_outer_left = None
-        pending_outer_right = None
-        ii_left = 0
-        ii_right = 0
+        routed, tail_meas = split_measurement_tail(routed)
+        if side == "L":
+            layers_left, init_meas = routed, tail_meas
+            pending_outer_left = None
+            ii_left = 0
+        else:
+            layers_right, final_meas = routed, tail_meas
+            pending_outer_right = None
+            ii_right = 0
+        if not emit_row:
+            return
+        row = {
+            "time": time.perf_counter() - t0,
+            "stage": "staged_outer_activated",
+            "side": side,
+            "left_layers": len(layers_left),
+            "right_layers": len(layers_right),
+            "u_consumed_total": total_u_consumed,
+            **get_tn_info(mpo_core),
+        }
+        stats_data.append(row)
+        if on_stats is not None:
+            on_stats(row)
+        logging.info("[staged outer activated] side=%s -> %s", side, row)
+
+    def activate_outer_chunks():
+        """Route both raw outer chunks together (the original joint behaviour).
+
+        Emits a single joint stats row, as before the per-side split, so anything
+        parsing the stats stream sees exactly one staged_outer_activated event.
+        """
+        activate_outer_side("L", emit_row=False)
+        activate_outer_side("R", emit_row=False)
         row = {
             "time": time.perf_counter() - t0,
             "stage": "staged_outer_activated",
@@ -1813,7 +1843,20 @@ def mpo_compress_unswap(
         or pending_outer_left is not None
         or pending_outer_right is not None
     ):
-        if (
+        if staged_activate_per_side:
+            # Release each side as soon as ITS inner chunk is exhausted. Waiting
+            # for both starves the smaller chunk's front: it sits at distance=inf
+            # while the other grinds on, and every no-progress unswap then arms a
+            # forced drain that can only pick from the one live side, with the
+            # cost guards bypassed. Measured on s2A_staged (inner 237 left / 133
+            # right, 1.78x imbalance): the right front finished at gate 294 and
+            # 100 of 122 forced-drain decisions afterwards had right_distance=inf,
+            # costing a factor 8 in retention over gates 297-304.
+            if ii_left >= len(layers_left) and pending_outer_left is not None:
+                activate_outer_side("L")
+            if ii_right >= len(layers_right) and pending_outer_right is not None:
+                activate_outer_side("R")
+        elif (
             ii_left >= len(layers_left)
             and ii_right >= len(layers_right)
             and pending_outer_left is not None

@@ -395,6 +395,17 @@ def build_parser():
         default=False,
         help="Route only the two center-adjacent quarters before activating raw outer chunks.",
     )
+    parser.add_argument(
+        "--staged-activate-per-side",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "With --staged-transpilation, release each outer chunk as soon as that "
+            "side's inner chunk is exhausted instead of waiting for both. Prevents "
+            "the smaller chunk's front from starving at distance=inf, which turns "
+            "every no-progress unswap into a forced drain on the one live side."
+        ),
+    )
     parser.add_argument("--max-its", type=int, default=20)
     parser.add_argument("--sabre-trials", type=int, default=90)
     parser.add_argument("--post-sabre-trials", type=int, default=50)
@@ -1087,6 +1098,7 @@ def main(argv=None):
         mpo_core=seeded_core,
         mpo_core_frames=seeded_frames,
         staged_transpilation=args.staged_transpilation,
+        staged_activate_per_side=args.staged_activate_per_side,
         max_bond=args.max_bond,
         cutoff=args.cutoff,
         unswap_threshold=args.unswap_threshold,
