@@ -475,6 +475,33 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--unswap-alignment-target",
+        default=None,
+        help=(
+            "Frame to pull BOTH boundary permutations toward, as a JSON list, or "
+            "'identity'. Without this, --unswap-alignment-weight only pulls an "
+            "object's own two frames together, which does nothing for a seam: two "
+            "independently routed modules still end up random relative to each "
+            "other (measured 619/664 inversions against 566 for a random 48-perm). "
+            "Building every module against the SAME target makes their edges line "
+            "up by construction, and the joining SWAP block costs 2^crossings, so "
+            "each crossing removed halves it. A large weight approximates the hard "
+            "constraint 'legs keep their original qubit labels'."
+        ),
+    )
+    parser.add_argument(
+        "--unswap-alignment-metric",
+        choices=["l1", "crossings"],
+        default="l1",
+        help=(
+            "How frame distance is scored. 'l1' is total displacement (the "
+            "original). 'crossings' is the max wires crossing any cut, which is "
+            "what a join actually costs: the SWAP block is 2^crossings. "
+            "Minimising l1 does not minimise crossings and measurably made seams "
+            "worse (k sum 52 -> 62 at weight 8) while improving retention."
+        ),
+    )
+    parser.add_argument(
         "--unswap-alignment-protect-gain",
         type=float,
         default=None,
@@ -1020,6 +1047,41 @@ def main(argv=None):
         logging.info("[seed] core frames L=%s R=%s",
                      seeded_frames["L"], seeded_frames["R"])
 
+    _alignment_target = None
+    if args.unswap_alignment_target:
+        _spec = args.unswap_alignment_target.strip()
+        if _spec.lower() == "identity":
+            _alignment_target = list(range(circuit.num_qubits))
+        elif _spec.startswith("edges:"):
+            # edges:<left.pkl>,<right.pkl> -- take the left target from the
+            # module that precedes this one (its R frame) and the right target
+            # from the module that follows (its L frame). A middle module built
+            # this way meets both neighbours at a low-crossing seam, without
+            # constraining those neighbours at all.
+            import pickle as _p2
+            _lp, _, _rp = _spec[len("edges:"):].partition(",")
+            def _bar2(layers, n):
+                for qc in layers or ():
+                    for inst in qc.data:
+                        if inst.operation.name == "barrier" and len(inst.qubits) == n:
+                            return [qc.find_bit(q).index for q in inst.qubits]
+                return None
+            _nq = circuit.num_qubits
+            _tl = _tr = None
+            if _lp.strip():
+                _d = _p2.load(open(_lp.strip(), "rb"))
+                _tl = _bar2(_d.get("layers_right"), _nq)   # predecessor's OUTPUT
+            if _rp.strip():
+                _d = _p2.load(open(_rp.strip(), "rb"))
+                _tr = _bar2(_d.get("layers_left"), _nq)    # successor's INPUT
+            _alignment_target = {"L": _tl, "R": _tr}
+        else:
+            _obj = json.loads(_spec)
+            _alignment_target = _obj if isinstance(_obj, dict) else list(_obj)
+        logging.info("[align] target=%s weight=%s mode=%s",
+                     _alignment_target, args.unswap_alignment_weight,
+                     args.unswap_select_mode)
+
     mpo, layers_left, layers_right, stats = mpo_compress_unswap(
         circuit,
         mpo_core=seeded_core,
@@ -1086,6 +1148,8 @@ def main(argv=None):
         unswap_route_proxy_protect_gain=args.unswap_route_proxy_protect_gain,
         unswap_route_proxy_max_cycles=args.unswap_route_proxy_max_cycles,
         unswap_alignment_weight=args.unswap_alignment_weight,
+        unswap_alignment_target=_alignment_target,
+        unswap_alignment_metric=args.unswap_alignment_metric,
         unswap_alignment_protect_gain=args.unswap_alignment_protect_gain,
         unswap_alignment_max_replacements=args.unswap_alignment_max_replacements,
         unswap_alignment_tie_loss=args.unswap_alignment_tie_loss,

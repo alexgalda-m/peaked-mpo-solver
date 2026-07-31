@@ -374,23 +374,68 @@ def swap_perm(perm, swaps):
     return perm
 
 
-def permutation_alignment_score(perm_left, perm_right):
+def permutation_alignment_score(perm_left, perm_right, metric="l1"):
+    """Distance between two frames.
+
+    metric="l1" is total displacement, the original measure.
+
+    metric="crossings" is the max number of wires crossing any cut of the
+    relative permutation. That is the one that matters for joining: the SWAP
+    block between two modules costs 2^crossings, so k=10 is a bond-1024 object
+    and k=20 is a million. Minimising L1 does NOT minimise crossings -- moving
+    many wires a little while pushing a few across the middle lowers total
+    displacement and raises the worst cut. Driving the unswapper on L1 made the
+    seams WORSE (k sum 52 -> 62 at weight 8) while improving retention, which is
+    exactly that failure mode.
+    """
     if len(perm_left) != len(perm_right):
         raise ValueError("permutations must have the same length")
     inv_left = np.argsort(perm_left)
     inv_right = np.argsort(perm_right)
-    return int(np.abs(inv_left - inv_right).sum())
+    if metric == "l1":
+        return int(np.abs(inv_left - inv_right).sum())
+    n = len(perm_left)
+    rel = [int(inv_right[x]) for x in np.asarray(perm_left, dtype=int)]
+    return max(sum(1 for i in range(n) if (i < c) != (rel[i] < c))
+               for c in range(1, n))
 
 
-def alignment_delta_for_swaps(perm_left, perm_right, swaps, how):
-    current_score = permutation_alignment_score(perm_left, perm_right)
+def alignment_delta_for_swaps(perm_left, perm_right, swaps, how, target=None, metric="l1"):
+    """Change in alignment cost if `swaps` are applied.
+
+    target=None keeps the original meaning: pull an object's OWN left and right
+    frames together. That does nothing for a seam, because two independently
+    routed objects still end up random relative to each other.
+
+    With a target frame, each side is instead pulled toward a shared external
+    reference. Two objects built against the SAME target then meet at a
+    low-crossing seam without either knowing about the other -- and the seam's
+    SWAP block costs 2^crossings, so every crossing removed halves it.
+    """
     next_left = list(perm_left)
     next_right = list(perm_right)
     if how in ("left", "both"):
         next_left = swap_perm(next_left, list(swaps))
     if how in ("right", "both"):
         next_right = swap_perm(next_right, list(swaps))
-    return permutation_alignment_score(next_left, next_right) - current_score
+    if target is None:
+        return (permutation_alignment_score(next_left, next_right, metric)
+                - permutation_alignment_score(perm_left, perm_right, metric))
+    # a dict gives each edge its OWN target, which is what a middle module needs:
+    # its left edge must meet the module before it and its right edge the module
+    # after it, and those are two different frames.
+    if isinstance(target, dict):
+        tl, tr = target.get("L"), target.get("R")
+    else:
+        tl = tr = target
+    current = nxt = 0
+    if how in ("left", "both") and tl is not None:
+        current += permutation_alignment_score(perm_left, tl, metric)
+        nxt += permutation_alignment_score(next_left, tl, metric)
+    if how in ("right", "both") and tr is not None:
+        current += permutation_alignment_score(perm_right, tr, metric)
+        nxt += permutation_alignment_score(next_right, tr, metric)
+    return nxt - current
 
 
 def layer_two_qubit_pairs(layer, include_swaps=False):
@@ -489,6 +534,8 @@ def select_route_proxy_swaps(
     route_proxy_max_bond_loss=0,
     route_proxy_protect_gain=None,
     alignment_weight=0.0,
+    alignment_target=None,
+    alignment_metric="l1",
 ):
     candidate_pair_set = set(candidate_pairs)
     improved_id_set = set(int(swap_id) for swap_id in np.asarray(candidate_ids).tolist())
@@ -535,6 +582,8 @@ def select_route_proxy_swaps(
             perm_right,
             [pair],
             how,
+            target=alignment_target,
+            metric=alignment_metric,
         )
         score = (
             bond_gain
@@ -577,6 +626,8 @@ def select_aligned_swaps(
     perm_left,
     perm_right,
     alignment_weight,
+    alignment_target=None,
+    alignment_metric="l1",
     alignment_protect_gain=None,
 ):
     candidate_pair_set = set(candidate_pairs)
@@ -599,6 +650,8 @@ def select_aligned_swaps(
             perm_right,
             [pair],
             how,
+            target=alignment_target,
+            metric=alignment_metric,
         )
         if bond_gain - alignment_weight * alignment_delta > 0:
             new_swaps.append(pair)
@@ -617,6 +670,8 @@ def select_alignment_budget_swaps(
     perm_left,
     perm_right,
     alignment_weight,
+    alignment_target=None,
+    alignment_metric="l1",
     max_replacements=None,
 ):
     candidate_pair_set = set(candidate_pairs)
@@ -642,6 +697,8 @@ def select_alignment_budget_swaps(
             perm_right,
             [pair],
             how,
+            target=alignment_target,
+            metric=alignment_metric,
         )
         score = bond_gain - float(alignment_weight or 0.0) * alignment_delta
         scored.append((score, bond_gain, -alignment_delta, swap_id, pair))
@@ -690,6 +747,8 @@ def select_alignment_tiebreak_swaps(
     perm_right,
     max_bond_gain_loss=1.0,
     max_replacements=1,
+    alignment_target=None,
+    alignment_metric="l1",
 ):
     candidate_pair_set = set(candidate_pairs)
     baseline_ids = [
@@ -711,6 +770,8 @@ def select_alignment_tiebreak_swaps(
             perm_right,
             [pair],
             how,
+            target=alignment_target,
+            metric=alignment_metric,
         )
         return {
             "swap_id": swap_id,
@@ -958,6 +1019,8 @@ def unswap(
     unswap_route_proxy_max_bond_loss=0,
     unswap_route_proxy_protect_gain=None,
     unswap_alignment_weight=0.0,
+    unswap_alignment_target=None,
+    unswap_alignment_metric="l1",
     unswap_alignment_protect_gain=None,
     unswap_alignment_max_replacements=None,
     unswap_alignment_tie_loss=1.0,
@@ -1104,6 +1167,8 @@ def unswap(
                             route_proxy_max_bond_loss=unswap_route_proxy_max_bond_loss,
                             route_proxy_protect_gain=unswap_route_proxy_protect_gain,
                             alignment_weight=unswap_alignment_weight,
+                            alignment_target=unswap_alignment_target,
+                            alignment_metric=unswap_alignment_metric,
                         )
                     elif unswap_select_mode == "bond_aligned":
                         new_swaps, route_proxy_rejected_swaps = select_aligned_swaps(
@@ -1116,6 +1181,8 @@ def unswap(
                             perm_left,
                             perm_right,
                             unswap_alignment_weight,
+                            alignment_target=unswap_alignment_target,
+                            alignment_metric=unswap_alignment_metric,
                             alignment_protect_gain=unswap_alignment_protect_gain,
                         )
                     elif unswap_select_mode == "bond_aligned_budget":
@@ -1129,6 +1196,8 @@ def unswap(
                             perm_left,
                             perm_right,
                             unswap_alignment_weight,
+                            alignment_target=unswap_alignment_target,
+                            alignment_metric=unswap_alignment_metric,
                             max_replacements=unswap_alignment_max_replacements,
                         )
                     elif unswap_select_mode == "bond_aligned_tiebreak":
@@ -1141,6 +1210,8 @@ def unswap(
                             how,
                             perm_left,
                             perm_right,
+                            alignment_target=unswap_alignment_target,
+                            alignment_metric=unswap_alignment_metric,
                             max_bond_gain_loss=unswap_alignment_tie_loss,
                             max_replacements=unswap_alignment_max_replacements,
                         )
@@ -1371,6 +1442,8 @@ def mpo_compress_unswap(
     unswap_route_proxy_protect_gain=None,
     unswap_route_proxy_max_cycles=None,
     unswap_alignment_weight=0.0,
+    unswap_alignment_target=None,
+    unswap_alignment_metric="l1",
     unswap_alignment_protect_gain=None,
     unswap_alignment_max_replacements=None,
     unswap_alignment_tie_loss=1.0,
@@ -2130,6 +2203,8 @@ def mpo_compress_unswap(
                     unswap_route_proxy_max_bond_loss=unswap_route_proxy_max_bond_loss,
                     unswap_route_proxy_protect_gain=unswap_route_proxy_protect_gain,
                     unswap_alignment_weight=unswap_alignment_weight,
+                    unswap_alignment_target=unswap_alignment_target,
+                    unswap_alignment_metric=unswap_alignment_metric,
                     unswap_alignment_protect_gain=unswap_alignment_protect_gain,
                     unswap_alignment_max_replacements=unswap_alignment_max_replacements,
                     unswap_alignment_tie_loss=unswap_alignment_tie_loss,
