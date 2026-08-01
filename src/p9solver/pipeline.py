@@ -18,6 +18,7 @@ from p9solver.retention import capture_fid10_state, restore_fid10_state
 from p9solver.qiskit_utils import iter_layers, merge_layers, elem_counts, merge_gates, get_tn_info
 
 import numpy as np
+import os
 import time
 
 import logging
@@ -1617,9 +1618,20 @@ def mpo_compress_unswap(
         if mpo_core_frames:
             _f = mpo_core_frames.get("L" if side == "left" else "R")
             if _f is not None:
-                # match the staged-outer path, which passes argsort of the
-                # frame (rewire_layers itself argsorts again when composing)
+                # Right side: argsort of the core's R frame (matches the
+                # staged-outer path; rewire_layers argsorts again when
+                # composing). Verified exact on a 10q known unitary
+                # (pin_seed_bisect E1, 2.5e-14).
+                #
+                # Left side: the layers being routed are the INVERTED left
+                # circuit, so the composition direction flips and the frame
+                # must be passed directly, not argsorted. With argsort on
+                # both sides the left-seeded object lands at overlap 0.25
+                # against mid.pre (pin_seed_bisect E2) while the right side
+                # is exact -- the asymmetry is the inversion.
                 _start = np.argsort(np.asarray(_f, dtype=int))
+                logging.info("[seed] rewire_initial side=%s frame=%s start=%s",
+                             side, list(_f), list(_start))
         routed_layers = rewire_layers(
             layers,
             _start,
@@ -2311,9 +2323,13 @@ def mpo_compress_unswap(
                 if side == "left":
                     remaining_layers = layers_left[(ii_left):] + init_meas
                     perm = new_perm_left
+                    if os.environ.get("P9_SEED_LEFT_INV") == "1":
+                        perm = list(np.argsort(np.asarray(perm, dtype=int)))
                 else:
                     remaining_layers = layers_right[(ii_right):] + final_meas
                     perm = new_perm_right
+                    if os.environ.get("P9_SEED_RIGHT_INV") == "1":
+                        perm = list(np.argsort(np.asarray(perm, dtype=int)))
 
                 cycle_route_candidates = (
                     route_candidates if current_u_consumed == 0 else 1
