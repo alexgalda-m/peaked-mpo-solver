@@ -396,6 +396,16 @@ def build_parser():
         help="Route only the two center-adjacent quarters before activating raw outer chunks.",
     )
     parser.add_argument(
+        "--cutoff-schedule",
+        default=None,
+        help=(
+            "Comma list of frac:cutoff pairs, e.g. '0:6e-4,0.10:1e-4,0.60:6e-4'. "
+            "The entry with the largest frac <= consumed work fraction sets the "
+            "SVD cutoff -- tighten only while sigma obfuscation pairs are open. "
+            "Same contract as the GPU winner's HQP_US_CUTOFF_SCHEDULE."
+        ),
+    )
+    parser.add_argument(
         "--forced-drain-by-cost",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -1111,6 +1121,11 @@ def main(argv=None):
         staged_transpilation=args.staged_transpilation,
         staged_activate_per_side=args.staged_activate_per_side,
         forced_drain_by_cost=args.forced_drain_by_cost,
+        cutoff_schedule=(
+            [(float(f), float(c)) for f, c in
+             (item.split(":") for item in args.cutoff_schedule.split(","))]
+            if args.cutoff_schedule else None
+        ),
         max_bond=args.max_bond,
         cutoff=args.cutoff,
         unswap_threshold=args.unswap_threshold,

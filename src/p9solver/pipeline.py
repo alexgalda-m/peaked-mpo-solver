@@ -1450,6 +1450,7 @@ def mpo_compress_unswap(
     staged_transpilation=False,
     staged_activate_per_side=False,
     forced_drain_by_cost=False,
+    cutoff_schedule=None,
 ):
     if swap_gate_representation == "current":
         routed_swap_representation = "block"
@@ -1865,6 +1866,21 @@ def mpo_compress_unswap(
         ):
             activate_outer_chunks()
         remaining_work_gates = T_U - total_u_consumed
+        if cutoff_schedule:
+            # Sigma-schedule: cutoff keyed to fraction of work consumed, so the
+            # SVD floor is tight only while obfuscation pairs are open. Same
+            # contract as the GPU winner's HQP_US_CUTOFF_SCHEDULE ("0:6e-4,
+            # 0.10:1e-4,0.60:6e-4"): the entry with the largest fraction <= the
+            # current consumed fraction wins.
+            _frac = (total_u_consumed / T_U) if T_U else 0.0
+            _new = cutoff
+            for _f, _c in cutoff_schedule:
+                if _frac >= _f:
+                    _new = _c
+            if _new != cutoff:
+                logging.info("[cutoff schedule] frac=%.3f cutoff %s -> %s",
+                             _frac, cutoff, _new)
+                cutoff = _new
         if (
             force_absorb_tail_gates > 0
             and remaining_work_gates > 0
