@@ -1450,6 +1450,8 @@ def mpo_compress_unswap(
     staged_transpilation=False,
     staged_activate_per_side=False,
     forced_drain_by_cost=False,
+    forced_drain_layer_budget=8,
+    forced_drain_escalate=False,
 ):
     if swap_gate_representation == "current":
         routed_swap_representation = "block"
@@ -2449,7 +2451,20 @@ def mpo_compress_unswap(
             if cycle_work_consumed == 0:
                 no_progress_unswap_cycles += 1
                 forced_work_remaining = max(forced_work_remaining, 1)
-                forced_layer_remaining = max(forced_layer_remaining, 8)
+                # The drain gets a LAYER budget to reach the next work gate.
+                # If that gate sits further away than the budget, the drain
+                # gives up (see the "forced drain layer limit" branch), the
+                # reroute regenerates swap layers, and the next cycle repeats
+                # the same failure -- an unswap/reroute livelock. Measured on
+                # d3_s2: 708 give-ups, 218 minutes, zero work gates consumed,
+                # with the MPO tiny (bond 64 vs cap 4096). Escalating the
+                # budget with the consecutive-stall count lets the drain reach
+                # progressively more distant work gates instead of retrying an
+                # identical, known-failing traversal.
+                budget = forced_drain_layer_budget
+                if forced_drain_escalate:
+                    budget *= max(1, no_progress_unswap_cycles)
+                forced_layer_remaining = max(forced_layer_remaining, budget)
             else:
                 no_progress_unswap_cycles = 0
 

@@ -407,6 +407,30 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--forced-drain-layer-budget",
+        type=int,
+        default=8,
+        help=(
+            "Layers a forced drain may absorb while hunting the next work gate "
+            "before giving up and returning to unswap. If the next work gate is "
+            "further away than this, the drain resets, the reroute regenerates "
+            "swap layers, and the cycle repeats identically -- an unswap/reroute "
+            "livelock. Raise it when a run stalls with mode=swap_thrash while the "
+            "MPO is small."
+        ),
+    )
+    parser.add_argument(
+        "--forced-drain-escalate",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Scale --forced-drain-layer-budget by the number of consecutive "
+            "zero-work unswap cycles, so a stalled traversal reaches "
+            "progressively more distant work gates instead of retrying an "
+            "identical, known-failing traversal."
+        ),
+    )
+    parser.add_argument(
         "--staged-activate-per-side",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -1111,6 +1135,8 @@ def main(argv=None):
         staged_transpilation=args.staged_transpilation,
         staged_activate_per_side=args.staged_activate_per_side,
         forced_drain_by_cost=args.forced_drain_by_cost,
+        forced_drain_layer_budget=args.forced_drain_layer_budget,
+        forced_drain_escalate=args.forced_drain_escalate,
         max_bond=args.max_bond,
         cutoff=args.cutoff,
         unswap_threshold=args.unswap_threshold,
