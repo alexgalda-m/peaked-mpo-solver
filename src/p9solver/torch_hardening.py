@@ -39,6 +39,15 @@ _qd.sgn=_sgn
 _svd=torch.linalg.svd
 def rsvd(A, full_matrices=False, **k):
     if A.dtype==torch.complex64:
+        # fp32 overflow safety independent of the fid10 tracker (FFID10=0 runs
+        # bypass retention.tracked_svd entirely): bound magnitudes and sanitize
+        # non-finite inputs before cuSOLVER sees them.
+        _m = A.abs().max()
+        if not torch.isfinite(_m):
+            A = torch.nan_to_num(A, nan=0.0, posinf=0.0, neginf=0.0)
+            _m = A.abs().max()
+        if float(_m) > 1e4:
+            A = A / _m
         if not A.is_cuda:
             # driver= is CUDA/cuSOLVER-only; CPU LAPACK path: upcast, and on gesdd
             # non-convergence retry via scipy's QR-based gesvd — the exact CPU
