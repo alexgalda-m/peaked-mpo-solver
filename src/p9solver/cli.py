@@ -39,6 +39,7 @@ def _make_backend(spec):
     """Build the to_backend callable (same contract as the GPU engine)."""
     if spec == "numpy":
         return None
+    from . import torch_hardening  # noqa: F401 -- global SVD/QR hardening
     import torch
     dtype = torch.complex64 if spec == "torch-c64" else torch.complex128
     dev = "cuda" if torch.cuda.is_available() else "cpu"
