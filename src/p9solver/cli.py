@@ -34,6 +34,19 @@ DEFAULT_EXPECTED_P9 = (
 )
 
 
+
+def _make_backend(spec):
+    """Build the to_backend callable (same contract as the GPU engine)."""
+    if spec == "numpy":
+        return None
+    import torch
+    dtype = torch.complex64 if spec == "torch-c64" else torch.complex128
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    logging.info("[backend] torch %s on %s", dtype, dev)
+    def to_backend(x):
+        return torch.as_tensor(x, dtype=dtype, device=dev)
+    return to_backend
+
 def parse_center(value):
     if any(ch in value for ch in ".eE"):
         return float(value)
@@ -394,6 +407,17 @@ def build_parser():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Route only the two center-adjacent quarters before activating raw outer chunks.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["numpy", "torch-c64", "torch-c128"],
+        default="numpy",
+        help=(
+            "Array backend. torch-c64/torch-c128 move every tensor op onto "
+            "torch (CUDA when available -- the launch log line reports the "
+            "device; abort if it says cpu when you expected cuda). c64 is the "
+            "GPU winner's dtype: ~2-4x faster, fid10 telemetry unaffected."
+        ),
     )
     parser.add_argument(
         "--cutoff-schedule",
@@ -1134,7 +1158,7 @@ def main(argv=None):
         equal=False,
         flip_freq=None,
         max_its=args.max_its,
-        to_backend=None,
+        to_backend=_make_backend(args.backend),
         seed=args.seed,
         hows=("both", "left", "right"),
         sabre_trials=args.sabre_trials,
@@ -1258,7 +1282,7 @@ def main(argv=None):
             layers_left[:-2],
             layers_right,
             cutoff=args.cutoff,
-            to_backend=None,
+            to_backend=_make_backend(args.backend),
         )
         materialize_time = time.perf_counter() - materialize_started
 

@@ -15,6 +15,14 @@ from autoray.autoray import backend_like
 from quimb.tensor import decomp
 from quimb.tensor import tensor_core
 
+def _as_np(x, dtype=None):
+    """numpy view of x; torch tensors (cuda or cpu) detach->cpu first."""
+    if hasattr(x, "detach"):
+        x = x.detach().cpu().numpy()
+    import numpy as _np
+    return _np.asarray(x, dtype=dtype) if dtype is not None else _np.asarray(x)
+
+
 _ACTIVE_TRACKER = None
 
 
@@ -83,7 +91,7 @@ class TruncationFid10Tracker:
                         )
                     else:
                         U, s, VH = scipy_linalg.svd(
-                            np.asarray(x),
+                            _as_np(x),
                             full_matrices=False,
                             check_finite=False,
                             lapack_driver="gesvd",
@@ -91,13 +99,13 @@ class TruncationFid10Tracker:
                 except (np.linalg.LinAlgError, ValueError):
                     # Classical gesvd remains the convergence fallback.
                     U, s, VH = scipy_linalg.svd(
-                        np.asarray(x, dtype=np.complex128),
+                        _as_np(x, np.complex128),
                         full_matrices=False,
                         check_finite=False,
                         lapack_driver="gesvd",
                     )
                     tracker.fallbacks += 1
-                full_power = float(np.vdot(np.asarray(s), np.asarray(s)).real)
+                full_power = float(np.vdot(_as_np(s), _as_np(s)).real)
                 result = decomp._trim_and_renorm_svd_result(
                     U, s, VH, cutoff, cutoff_mode, max_bond, absorb_code, renorm
                 )
@@ -105,7 +113,7 @@ class TruncationFid10Tracker:
             if full_power > 0.0:
                 left = result[0]
                 rank = int(np.shape(left)[-1])
-                kept = np.asarray(s)[:rank]
+                kept = _as_np(s)[:rank]
                 kept_power = float(np.vdot(kept, kept).real)
                 fraction = min(1.0, max(kept_power / full_power, np.finfo(float).tiny))
                 tracker.log10_retained += math.log10(fraction)
