@@ -81,6 +81,24 @@ class TruncationFid10Tracker:
             # ``s`` before ``_trim_and_renorm_svd_result``.  It performs the
             # exact same one SVD as the uninstrumented solver.
             absorb_code = decomp._ABSORB_MAP[absorb]
+            if type(x).__module__.startswith("torch"):
+                # complex64 scale management: probe apply-chains grow norms
+                # geometrically and overflow fp32 (~3.4e38), poisoning SVD with
+                # inf/nan -- observed as deterministic silent deaths ~70s into
+                # any real GPU workload (cuSOLVER err 4, then gesvd
+                # non-convergence). Keep magnitudes bounded by persistently
+                # down-scaling; global operator scale is irrelevant to the
+                # kept-fraction ledger, argmax extraction, and sampling.
+                import torch
+                _m = float(x.abs().max())
+                if not math.isfinite(_m):
+                    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+                    tracker.nonfinite_sanitized = getattr(
+                        tracker, "nonfinite_sanitized", 0) + 1
+                    _m = float(x.abs().max())
+                if _m > 1e4:
+                    x = x / _m
+                    tracker.rescales = getattr(tracker, "rescales", 0) + 1
             with backend_like(backend):
                 try:
                     if tracker.svd_driver == "native":
