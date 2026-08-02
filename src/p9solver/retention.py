@@ -8,6 +8,7 @@ alter the solver's selected ranks or tensors.
 from __future__ import annotations
 
 import math
+import os
 import numpy as np
 from scipy import linalg as scipy_linalg
 from autoray import do
@@ -104,11 +105,27 @@ class TruncationFid10Tracker:
             with backend_like(backend):
                 try:
                     if tracker.svd_driver == "native":
-                        # Preserve Quimb's exact production path. On this
-                        # laptop NumPy dispatches to Apple Accelerate LAPACK.
-                        U, s, VH = do(
-                            "linalg.svd", x, full_matrices=False
-                        )
+                        if type(x).__module__.startswith("torch") \
+                                and getattr(x, "is_cuda", False):
+                            # cuSOLVER's default Jacobi SVD can emit NaN
+                            # silently on non-convergence (observed: 36
+                            # tainted tensors per whole-circuit run even with
+                            # all inputs bounded <=1e3). The GPU engine always
+                            # pinned the QR-based gesvd driver for exactly
+                            # this reason (gpu_engine/fp32_patch.py).
+                            import torch
+                            U, s, VH = torch.linalg.svd(
+                                x, full_matrices=False,
+                                driver=os.environ.get(
+                                    "P9_CUDA_SVD_DRIVER", "gesvd"),
+                            )
+                        else:
+                            # Preserve Quimb's exact production path. On this
+                            # laptop NumPy dispatches to Apple Accelerate
+                            # LAPACK.
+                            U, s, VH = do(
+                                "linalg.svd", x, full_matrices=False
+                            )
                     else:
                         U, s, VH = scipy_linalg.svd(
                             _as_np(x),
