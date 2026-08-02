@@ -96,14 +96,31 @@ class TruncationFid10Tracker:
                             check_finite=False,
                             lapack_driver="gesvd",
                         )
-                except (np.linalg.LinAlgError, ValueError):
+                except (np.linalg.LinAlgError, ValueError, RuntimeError) as err:
                     # Classical gesvd remains the convergence fallback.
+                    # RuntimeError covers torch._C._LinAlgError: cuSOLVER's
+                    # default driver fails to converge on ill-conditioned
+                    # complex64 inputs (error code 4) -- observed on Blackwell
+                    # within ~70s of any real d3 workload. The proven remedy
+                    # (gpu_engine/fp32_patch.py) is the QR-based gesvd path on
+                    # CPU; results are cast back to the source device/dtype so
+                    # the torch network stays homogeneous.
+                    is_torch = type(x).__module__.startswith("torch")
+                    if not is_torch and isinstance(err, RuntimeError)                             and not isinstance(err, np.linalg.LinAlgError):
+                        raise
                     U, s, VH = scipy_linalg.svd(
                         _as_np(x, np.complex128),
                         full_matrices=False,
                         check_finite=False,
                         lapack_driver="gesvd",
                     )
+                    if is_torch:
+                        import torch
+                        real = (torch.float32
+                                if x.dtype == torch.complex64 else torch.float64)
+                        U = torch.as_tensor(U, dtype=x.dtype, device=x.device)
+                        s = torch.as_tensor(s, dtype=real, device=x.device)
+                        VH = torch.as_tensor(VH, dtype=x.dtype, device=x.device)
                     tracker.fallbacks += 1
                 full_power = float(np.vdot(_as_np(s), _as_np(s)).real)
                 result = decomp._trim_and_renorm_svd_result(
