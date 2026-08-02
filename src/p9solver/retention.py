@@ -92,6 +92,8 @@ class TruncationFid10Tracker:
                 import torch
                 _m = float(x.abs().max())
                 if not math.isfinite(_m):
+                    import logging
+                    logging.warning("[fp32] NON-FINITE at SVD -- RUN TAINTED")
                     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
                     tracker.nonfinite_sanitized = getattr(
                         tracker, "nonfinite_sanitized", 0) + 1

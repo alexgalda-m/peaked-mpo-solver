@@ -37,6 +37,45 @@ def mpo_from_circuit(circ: Circuit):
 #  MPO x MPO composition
 # ------------------------------------------------------------------
 
+
+
+_TAINT = {"nonfinite": 0, "rescales": 0}
+
+
+def _bound_scales(mpo):
+    """fp32 scale management for torch backends.
+
+    Contractions inside quimb's apply can overflow complex64 BEFORE any SVD
+    sees the data (observed on Blackwell: silent inf -> nan -> the MPO
+    degenerates to a bond-1 zero object that then "completes" with perfect
+    retention). Bound every tensor's magnitude right after each apply; global
+    operator scale is irrelevant to the kept-fraction ledger, argmax
+    extraction, and sampling. A non-finite tensor is sanitized but LOUDLY
+    tainted -- a tainted run must never be trusted as a result.
+    """
+    try:
+        t0 = mpo.tensors[0].data
+    except (AttributeError, IndexError):
+        return mpo
+    if not type(t0).__module__.startswith("torch"):
+        return mpo
+    import logging
+    import torch
+    for t in mpo.tensors:
+        d = t.data
+        m = float(d.abs().max())
+        if m != m or m == float("inf"):
+            _TAINT["nonfinite"] += 1
+            logging.warning("[fp32] NON-FINITE tensor sanitized -- RUN TAINTED "
+                            "(count=%d)", _TAINT["nonfinite"])
+            d = torch.nan_to_num(d, nan=0.0, posinf=0.0, neginf=0.0)
+            t.modify(data=d)
+            m = float(d.abs().max())
+        if m > 1e3:
+            _TAINT["rescales"] += 1
+            t.modify(data=d / m)
+    return mpo
+
 def apply_mpo(mpo1: MatrixProductOperator, mpo2: MatrixProductOperator,
                 side,
                 max_bond=None,
@@ -45,7 +84,7 @@ def apply_mpo(mpo1: MatrixProductOperator, mpo2: MatrixProductOperator,
                 compress=True,
                 **compress_opts):
     if side == "right":
-        return mpo1.apply(
+        return _bound_scales(mpo1.apply(
             mpo2,
             compress=compress,
             max_bond=max_bond,
@@ -53,9 +92,9 @@ def apply_mpo(mpo1: MatrixProductOperator, mpo2: MatrixProductOperator,
             create_bond=True,
             contract=contract,
             **compress_opts,
-        )
+        ))
     elif side == "left":
-        return mpo2.apply(
+        return _bound_scales(mpo2.apply(
             mpo1,
             compress=compress,
             max_bond=max_bond,
@@ -63,7 +102,7 @@ def apply_mpo(mpo1: MatrixProductOperator, mpo2: MatrixProductOperator,
             create_bond=True,
             contract=contract,
             **compress_opts,
-        )
+        ))
     else:
         raise ValueError("side must be 'left' or 'right'.")
 
