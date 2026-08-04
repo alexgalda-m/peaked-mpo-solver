@@ -1047,6 +1047,13 @@ def main(argv=None):
         _b = _pk.load(open(args.seed_mpo, "rb"))
         seeded_core = _b["mpo"] if isinstance(_b, dict) and "mpo" in _b else _b
         seeded_core.fuse_multibonds_()
+        # Seeds are shipped as numpy (c64 on disk); under a torch backend every
+        # OTHER tensor in the run is a torch Tensor, and quimb's contraction
+        # refuses the mix ("tensordot(): argument 'other' must be Tensor, not
+        # numpy.ndarray") at the first probe. Move the seed onto the backend
+        # before anything touches it.
+        if args.backend != "numpy":
+            seeded_core.apply_to_arrays(_make_backend(args.backend))
         _lr = sum(
             1
             for ix in seeded_core.ind_map
@@ -1069,6 +1076,8 @@ def main(argv=None):
                 _o = _pk.load(open(_path.strip(), "rb"))
                 _o = _o["mpo"] if isinstance(_o, dict) and "mpo" in _o else _o
                 _o.fuse_multibonds_()
+                if args.backend != "numpy":
+                    _o.apply_to_arrays(_make_backend(args.backend))
                 logging.info("[seed] absorbing %s factor %s (bond=%d)",
                              _side.strip(), _path.strip(), _o.max_bond())
                 seeded_core = _o.apply(
