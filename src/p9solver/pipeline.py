@@ -355,7 +355,7 @@ def count_work_ops_from_ops(ops):
 
 
 def adaptive_forced_drain_layer_budget(current, *distances):
-    """Keep a forced drain alive until the nearest live work frontier.
+    """Keep a forced drain alive until the selected live work frontier.
 
     The legacy fixed budget of eight accepted layers can stop a few routed
     SWAP layers short of work. The subsequent deterministic reroute recreates
@@ -368,6 +368,44 @@ def adaptive_forced_drain_layer_budget(current, *distances):
     if not finite:
         return current
     return max(int(current), min(finite) + 1)
+
+
+def choose_hybrid_forced_drain_side(
+    left_distance,
+    right_distance,
+    counts_left,
+    counts_right,
+    *,
+    distance_weight=0.25,
+    committed_side=None,
+):
+    """Choose and optionally retain a work frontier using live MPO cost.
+
+    ``log1p(elements)`` makes multiplicative tensor growth comparable with a
+    small linear routing-distance penalty.  Once chosen, a live committed side
+    wins until work is absorbed; the pipeline may still break commitment for
+    its hard 4x-memory safety guard.
+    """
+
+    candidates = []
+    for side, distance, counts in (
+        ("left", left_distance, counts_left),
+        ("right", right_distance, counts_right),
+    ):
+        if not np.isfinite(distance):
+            continue
+        score = float(np.log1p(max(0.0, float(counts)))) + (
+            float(distance_weight) * int(distance)
+        )
+        candidates.append((score, int(distance), float(counts), side))
+    if not candidates:
+        return None, None
+    live_sides = {item[3] for item in candidates}
+    if committed_side in live_sides:
+        chosen = next(item for item in candidates if item[3] == committed_side)
+        return committed_side, chosen[0]
+    chosen = min(candidates)
+    return chosen[3], chosen[0]
 
 
 def score_absorb_candidate(mpo: MatrixProductOperator, mode):
@@ -1467,8 +1505,17 @@ def mpo_compress_unswap(
     staged_transpilation=False,
     staged_activate_per_side=False,
     forced_drain_by_cost=False,
+    forced_drain_policy=None,
+    forced_drain_distance_weight=0.25,
     cutoff_schedule=None,
 ):
+    if forced_drain_policy is None:
+        forced_drain_policy = "cost" if forced_drain_by_cost else "distance"
+    if forced_drain_policy not in {"distance", "cost", "hybrid"}:
+        raise ValueError(f"unsupported forced drain policy: {forced_drain_policy}")
+    if forced_drain_distance_weight < 0:
+        raise ValueError("forced drain distance weight must be non-negative")
+
     if swap_gate_representation == "current":
         routed_swap_representation = "block"
         unswap_swap_representation = "cx"
@@ -1758,6 +1805,7 @@ def mpo_compress_unswap(
     termination_detail = None
     forced_work_remaining = 0
     forced_layer_remaining = 0
+    forced_drain_committed_side = None
     tail_virtualized = False
     tail_virtual_frames = None
 
@@ -2106,6 +2154,8 @@ def mpo_compress_unswap(
         forced_drain_active = (
             forced_work_remaining > 0 and forced_layer_remaining > 0
         )
+        if not forced_drain_active:
+            forced_drain_committed_side = None
         if forced_drain_active:
             def distance_to_next_work(layers, index):
                 for distance, layer in enumerate(layers[index:]):
@@ -2116,8 +2166,37 @@ def mpo_compress_unswap(
             left_distance = distance_to_next_work(layers_left, ii_left)
             right_distance = distance_to_next_work(layers_right, ii_right)
             drain_rule = "distance"
-            if (
-                forced_drain_by_cost
+            hybrid_score = None
+            if forced_drain_policy == "hybrid":
+                chosen_side, hybrid_score = choose_hybrid_forced_drain_side(
+                    left_distance,
+                    right_distance,
+                    counts_left,
+                    counts_right,
+                    distance_weight=forced_drain_distance_weight,
+                    committed_side=forced_drain_committed_side,
+                )
+                if chosen_side is not None:
+                    do_left = chosen_side == "left"
+                    drain_rule = (
+                        "hybrid_commit"
+                        if forced_drain_committed_side == chosen_side
+                        else "hybrid"
+                    )
+                    forced_drain_committed_side = chosen_side
+                selected_counts = counts_left if do_left else counts_right
+                other_counts = counts_right if do_left else counts_left
+                other_distance = right_distance if do_left else left_distance
+                if (
+                    selected_counts > 4 * unswap_threshold
+                    and other_counts <= 4 * unswap_threshold
+                    and np.isfinite(other_distance)
+                ):
+                    do_left = not do_left
+                    forced_drain_committed_side = "left" if do_left else "right"
+                    drain_rule = "hybrid_safety"
+            elif (
+                forced_drain_policy == "cost"
                 and left_distance != float("inf")
                 and right_distance != float("inf")
             ):
@@ -2152,9 +2231,9 @@ def mpo_compress_unswap(
                 forced_layer_remaining = extended_budget
             logging.info(
                 "[forced drain frontier] left_distance=%s right_distance=%s "
-                "counts_left=%s counts_right=%s rule=%s chosen=%s",
+                "counts_left=%s counts_right=%s rule=%s chosen=%s hybrid_score=%s",
                 left_distance, right_distance, counts_left, counts_right,
-                drain_rule, "left" if do_left else "right",
+                drain_rule, "left" if do_left else "right", hybrid_score,
             )
 
         # Select the smallest one, except for a small forced drain after an
@@ -2172,6 +2251,7 @@ def mpo_compress_unswap(
                 selected_counts, unswap_threshold)
             forced_work_remaining = 0
             forced_layer_remaining = 0
+            forced_drain_committed_side = None
             forced_drain_active = False
         selected_absorbable = (
             forced_drain_active
@@ -2224,12 +2304,15 @@ def mpo_compress_unswap(
                 forced_layer_remaining = max(0, forced_layer_remaining - 1)
                 if new_us > 0:
                     forced_work_remaining = max(0, forced_work_remaining - new_us)
+                    if forced_work_remaining == 0:
+                        forced_drain_committed_side = None
                 if forced_layer_remaining == 0 and forced_work_remaining > 0:
                     logging.warning(
                         "[forced drain layer limit] returning to unswap with work_remaining=%s",
                         forced_work_remaining,
                     )
                     forced_work_remaining = 0
+                    forced_drain_committed_side = None
             
             logging.info((f"[{ii_right}R/{len(layers_right)}]" if side_chosen == "R" else f"[{ii_left}L/{len(layers_left)}]") +
                          f"(swap: {new_swaps}, u: {new_us} | c_u: {current_u_consumed} | t_u_l: {total_u_consumed_left}/{T_UL} | t_u_r: {total_u_consumed_right}/{T_UR} | t_u: {total_u_consumed}/{T_U}) -> " +
@@ -2525,6 +2608,7 @@ def mpo_compress_unswap(
                 no_progress_unswap_cycles += 1
                 forced_work_remaining = max(forced_work_remaining, 1)
                 forced_layer_remaining = max(forced_layer_remaining, 8)
+                forced_drain_committed_side = None
             else:
                 no_progress_unswap_cycles = 0
 

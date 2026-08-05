@@ -471,6 +471,22 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--forced-drain-policy",
+        choices=("distance", "cost", "hybrid"),
+        default=None,
+        help=(
+            "Forced-drain frontier policy. The hybrid policy scores live tensor "
+            "growth plus distance and commits to its choice until work is absorbed. "
+            "When omitted, --forced-drain-by-cost retains its legacy behavior."
+        ),
+    )
+    parser.add_argument(
+        "--forced-drain-distance-weight",
+        type=float,
+        default=0.25,
+        help="Routing-layer penalty used by --forced-drain-policy hybrid.",
+    )
+    parser.add_argument(
         "--staged-activate-per-side",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -1266,6 +1282,8 @@ def main(argv=None):
         staged_transpilation=args.staged_transpilation,
         staged_activate_per_side=args.staged_activate_per_side,
         forced_drain_by_cost=args.forced_drain_by_cost,
+        forced_drain_policy=args.forced_drain_policy,
+        forced_drain_distance_weight=args.forced_drain_distance_weight,
         cutoff_schedule=(
             [(float(f), float(c)) for f, c in
              (item.split(":") for item in args.cutoff_schedule.split(","))]
