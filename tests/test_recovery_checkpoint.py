@@ -11,6 +11,13 @@ def test_driver_and_checkpoint_cli_defaults():
     assert args.svd_driver == "native"
     assert args.checkpoint_dir is None
     assert args.checkpoint_every_work_gates == 0
+    assert args.track_fid10_until_work_gates is None
+
+    bounded = build_parser().parse_args([
+        "--qasm", "toy.qasm", "--track-fid10-until-work-gates", "160"
+    ])
+    assert bounded.track_fid10
+    assert bounded.track_fid10_until_work_gates == 160
 
 
 def test_recovery_checkpoint_is_atomic_and_cpu_backed(tmp_path):

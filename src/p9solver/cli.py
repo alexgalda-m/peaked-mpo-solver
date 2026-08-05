@@ -407,6 +407,16 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--track-fid10-until-work-gates",
+        type=int,
+        default=None,
+        help=(
+            "Uninstall fid10 instrumentation after this many consumed work "
+            "gates. This preserves a known-good early numerical path without "
+            "paying its telemetry cost for the full traversal."
+        ),
+    )
+    parser.add_argument(
         "--svd-driver",
         choices=("native", "default", "gesvdj"),
         default="native",
@@ -1113,6 +1123,7 @@ def main(argv=None):
                 plot_state["warned_samples"] = True
 
     def handle_live_stats(row):
+        nonlocal fid10_tracker
         row["fid10"] = (
             fid10_tracker.log10_retained if fid10_tracker is not None else None
         )
@@ -1122,6 +1133,20 @@ def main(argv=None):
         row["fid10_svd_events"] = fid10_tracker.events if fid10_tracker is not None else 0
         row["fid10_svd_fallbacks"] = fid10_tracker.fallbacks if fid10_tracker is not None else 0
         stats_live.append(row)
+        fid10_until = args.track_fid10_until_work_gates
+        consumed = int(row.get("u_consumed_total") or 0)
+        if (
+            fid10_tracker is not None
+            and fid10_until is not None
+            and consumed >= fid10_until
+        ):
+            fid10_tracker.uninstall()
+            fid10_tracker = None
+            logging.info(
+                "fid10 instrumentation disabled at work gate %s (limit %s)",
+                consumed,
+                fid10_until,
+            )
         if row.get("stage") == "termination":
             write_partial_summary("terminated")
             maybe_render_live_plot(force=True)
