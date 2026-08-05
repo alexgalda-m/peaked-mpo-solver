@@ -354,6 +354,22 @@ def count_work_ops_from_ops(ops):
     )
 
 
+def adaptive_forced_drain_layer_budget(current, *distances):
+    """Keep a forced drain alive until the nearest live work frontier.
+
+    The legacy fixed budget of eight accepted layers can stop a few routed
+    SWAP layers short of work. The subsequent deterministic reroute recreates
+    the same frontier, so the solver loops without accepting another work
+    gate. Extend only to the nearest finite frontier; the normal per-layer
+    cost choice and the 4x memory fizzle remain authoritative.
+    """
+
+    finite = [int(distance) for distance in distances if np.isfinite(distance)]
+    if not finite:
+        return current
+    return max(int(current), min(finite) + 1)
+
+
 def score_absorb_candidate(mpo: MatrixProductOperator, mode):
     if mode == "total_elems":
         return elem_counts(mpo)
@@ -2099,6 +2115,16 @@ def mpo_compress_unswap(
 
             left_distance = distance_to_next_work(layers_left, ii_left)
             right_distance = distance_to_next_work(layers_right, ii_right)
+            extended_budget = adaptive_forced_drain_layer_budget(
+                forced_layer_remaining, left_distance, right_distance
+            )
+            if extended_budget > forced_layer_remaining:
+                logging.info(
+                    "[forced drain adaptive extension] layers %s -> %s",
+                    forced_layer_remaining,
+                    extended_budget,
+                )
+                forced_layer_remaining = extended_budget
             drain_rule = "distance"
             if (
                 forced_drain_by_cost
