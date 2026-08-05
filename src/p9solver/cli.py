@@ -109,6 +109,25 @@ def write_factor_bundle(path, mpo, layers_left, layers_right, factor_interface=N
     tmp_path.replace(path)
 
 
+def write_recovery_checkpoint(path, state, metadata=None):
+    """Atomically save a portable CPU copy of an in-flight factor."""
+    checkpoint = dict(state)
+    mpo = checkpoint["mpo"].copy()
+    mpo.apply_to_arrays(
+        lambda x: np.array(
+            x.detach().cpu().numpy() if hasattr(x, "detach") else x,
+            copy=True,
+        )
+    )
+    checkpoint["mpo"] = mpo
+    checkpoint["schema"] = "p9solver.recovery-checkpoint.v1"
+    checkpoint["metadata"] = dict(metadata or {})
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("wb") as handle:
+        pickle.dump(checkpoint, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp_path.replace(path)
+
+
 def build_factor_interface(path, qasm_path, circuit, mpo, layers_left, layers_right):
     """Load and validate the logical-leg contract for a saved MPO factor."""
     interface = json.loads(Path(path).read_text())
@@ -385,6 +404,16 @@ def build_parser():
             "SVD kernel used by the in-place fid10 tracker. Native preserves "
             "Quimb's NumPy/Accelerate production path; gesvd is the classical "
             "SciPy LAPACK variant."
+        ),
+    )
+    parser.add_argument(
+        "--svd-driver",
+        choices=("native", "default", "gesvdj"),
+        default="native",
+        help=(
+            "CUDA SVD implementation selected independently of fid10. "
+            "'native' pins the production QR-based gesvd path; the other "
+            "choices are diagnostic and do not enable telemetry."
         ),
     )
     parser.add_argument(
@@ -683,6 +712,24 @@ def build_parser():
         help="Debug option: stop compression after at least this many work gates are consumed.",
     )
     parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=None,
+        help="Write verified atomic CPU recovery bundles while compression runs.",
+    )
+    parser.add_argument(
+        "--checkpoint-every-work-gates",
+        type=int,
+        default=0,
+        help="Checkpoint after this many additional consumed work gates (0 disables).",
+    )
+    parser.add_argument(
+        "--checkpoint-dense-after",
+        type=int,
+        default=None,
+        help="At or after this consumed-work count, checkpoint every successful work gate.",
+    )
+    parser.add_argument(
         "--abort-after-no-progress-unswap-cycles",
         type=int,
         default=2,
@@ -860,6 +907,11 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    # Driver selection must happen before _make_backend imports the global
+    # torch hardening patch.  Keep this independent of fid10 instrumentation.
+    selected_driver = "gesvd" if args.svd_driver == "native" else args.svd_driver
+    os.environ["P9_SVD_DRIVER"] = selected_driver
+    os.environ["P9_CUDA_SVD_DRIVER"] = selected_driver
     # The unswap equal-bond tie-breaker uses NumPy's RNG.  Seed it alongside
     # SABRE so --seed identifies the complete compression trajectory.
     np.random.seed(args.seed if args.numpy_seed is None else args.numpy_seed)
@@ -908,6 +960,65 @@ def main(argv=None):
         else None
     )
     compression_started = None
+    checkpoint_state = {"last_work": -1, "generation": 0}
+    if args.checkpoint_dir is not None:
+        args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    def handle_recovery_checkpoint(state):
+        if args.checkpoint_dir is None:
+            return
+        work = int(state.get("u_consumed_total", 0))
+        dense = (
+            args.checkpoint_dense_after is not None
+            and work >= args.checkpoint_dense_after
+        )
+        periodic = (
+            args.checkpoint_every_work_gates > 0
+            and work - checkpoint_state["last_work"]
+            >= args.checkpoint_every_work_gates
+        )
+        if work <= checkpoint_state["last_work"] or not (dense or periodic):
+            return
+        latest = args.checkpoint_dir / "latest.pkl"
+        previous = args.checkpoint_dir / "previous.pkl"
+        if latest.exists():
+            latest.replace(previous)
+        checkpoint_state["generation"] += 1
+        write_recovery_checkpoint(
+            latest,
+            state,
+            metadata={
+                "qasm_sha256": hashlib.sha256(qasm_path.read_bytes()).hexdigest(),
+                "tag": tag,
+                "generation": checkpoint_state["generation"],
+                "parameters": vars(args),
+                "environment": environment,
+            },
+        )
+        with latest.open("rb") as handle:
+            saved = pickle.load(handle)
+        if saved.get("schema") != "p9solver.recovery-checkpoint.v1":
+            raise RuntimeError("recovery checkpoint failed schema verification")
+        checkpoint_state["last_work"] = work
+        write_json(
+            args.checkpoint_dir / "status.json",
+            {
+                "schema": saved["schema"],
+                "generation": checkpoint_state["generation"],
+                "u_consumed_total": work,
+                "remaining_work_gates": state.get("remaining_work_gates"),
+                "path": latest.name,
+                "verified": True,
+                "written_at": time.time(),
+            },
+        )
+        logging.info(
+            "[checkpoint] generation=%s work=%s remaining=%s path=%s",
+            checkpoint_state["generation"],
+            work,
+            state.get("remaining_work_gates"),
+            latest,
+        )
     plot_state = {
         "last_live_refresh": 0.0,
         "run_module": None,
@@ -1167,6 +1278,7 @@ def main(argv=None):
         post_sabre_seed=None,
         sabre_heuristic="decay",
         on_stats=handle_live_stats,
+        on_checkpoint=handle_recovery_checkpoint,
         max_unswap_cycles=args.max_unswap_cycles,
         max_work_gates=args.max_work_gates,
         abort_after_no_progress_unswap_cycles=(

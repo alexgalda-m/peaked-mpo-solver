@@ -1400,6 +1400,7 @@ def mpo_compress_unswap(
     post_sabre_seed=None,
     sabre_heuristic="decay",
     on_stats=None,
+    on_checkpoint=None,
     max_unswap_cycles=None,
     max_work_gates=None,
     abort_after_no_progress_unswap_cycles=2,
@@ -2228,6 +2229,22 @@ def mpo_compress_unswap(
             stats_data.append(row)
             if on_stats is not None:
                 on_stats(row)
+            if on_checkpoint is not None and new_us > 0:
+                on_checkpoint({
+                    "mpo": mpo_core,
+                    "layers_left": layers_left[ii_left:] + init_meas,
+                    "layers_right": layers_right[ii_right:] + final_meas,
+                    "pending_outer_left": pending_outer_left,
+                    "pending_outer_right": pending_outer_right,
+                    "u_consumed_total": total_u_consumed,
+                    "u_consumed_total_left": total_u_consumed_left,
+                    "u_consumed_total_right": total_u_consumed_right,
+                    "remaining_work_gates": T_U - total_u_consumed,
+                    "total_work_gates": T_U,
+                    "unswap_cycles": unswap_cycles,
+                    "tail_virtual_frames": tail_virtual_frames,
+                    "termination_reason": "checkpoint",
+                })
 
             if max_work_gates is not None and total_u_consumed >= max_work_gates:
                 termination_reason = "max_work_gates"
