@@ -21,6 +21,7 @@ diagnostics = ["matplotlib>=3.8"]
 
 [project.scripts]
 p9solve = "p9solver.cli:main"
+p9resume = "p9solver.recovery:main"
 
 [build-system]
 requires = ["hatchling"]
