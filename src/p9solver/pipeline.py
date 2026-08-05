@@ -2656,6 +2656,44 @@ def mpo_compress_unswap(
 
 def mpo_to_mps(mpo_core, layers_left, layers_right, max_bond=4096, cutoff=0.001, to_backend=None):
     q2c = lambda qc: quimb_circuit(qc.decompose("unitary"), Circuit, to_backend=to_backend)
+
+    def unitary_layers(layers):
+        """Drop routing readout layers before reversing a left residual.
+
+        A completed factor normally leaves only barriers and measurements in
+        its bundles.  Qiskit quite rightly refuses to invert ``measure``;
+        attempting to do so made ``mpo_to_mps`` fail before it reached the
+        already-complete core.  These operations carry a boundary frame, not
+        state evolution, and are handled separately below.
+        """
+        kept = []
+        for layer in layers or ():
+            cleaned = QuantumCircuit(mpo_core.L)
+            for instruction in layer.data:
+                if instruction.operation.name in {"barrier", "measure", "delay"}:
+                    continue
+                cleaned.append(
+                    instruction.operation,
+                    [layer.find_bit(q).index for q in instruction.qubits],
+                )
+            if cleaned.data:
+                kept.append(cleaned)
+        return kept
+
+    def readout_frame(layers):
+        """Return classical-bit order -> final tensor site, or identity."""
+        result = list(range(mpo_core.L))
+        for layer in layers:
+            mapping = {}
+            for instruction in layer.data:
+                if instruction.operation.name == "measure":
+                    classical = layer.find_bit(instruction.clbits[0]).index
+                    site = layer.find_bit(instruction.qubits[0]).index
+                    mapping[classical] = site
+            if len(mapping) == mpo_core.L:
+                result = [mapping[i] for i in range(mpo_core.L)]
+        return result
+
     # Use the compressed MPO to get the MPS by applying it to |0> state
     final_mps = quimb_circuit(
         QuantumCircuit(len(mpo_core.sites)),
@@ -2664,7 +2702,11 @@ def mpo_to_mps(mpo_core, layers_left, layers_right, max_bond=4096, cutoff=0.001,
     ).psi
 
     # First take the leftover front layers
-    layers_left = list(iter_layers(merge_layers(layers_left).inverse())) if len(layers_left) > 0 else []
+    left_unitaries = unitary_layers(layers_left)
+    layers_left = (
+        list(iter_layers(merge_layers(left_unitaries).inverse()))
+        if left_unitaries else []
+    )
     
     for ii_left in range(len(layers_left)):
         l_left = layers_left[ii_left]
@@ -2694,7 +2736,7 @@ def mpo_to_mps(mpo_core, layers_left, layers_right, max_bond=4096, cutoff=0.001,
     logging.info(f"[Front MPS + Core MPO + Right MPS] -> " + str(get_tn_info(final_mps)))
 
     # Extract final permutation from measurements
-    final_perm = [g.qubits[0]._index for g in final_meas[-1]]
+    final_perm = readout_frame(final_meas)
 
     # Return MPS and final perm
     return final_mps, final_perm
