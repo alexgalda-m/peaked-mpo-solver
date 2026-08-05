@@ -1452,6 +1452,7 @@ def mpo_compress_unswap(
     staged_activate_per_side=False,
     forced_drain_by_cost=False,
     forced_drain_max_threshold_multiple=4.0,
+    forced_drain_max_growth=0.0,
     forced_drain_layer_budget=8,
     forced_drain_escalate=False,
     cutoff_schedule=None,
@@ -2134,24 +2135,49 @@ def mpo_compress_unswap(
         # ineffective unswap: rerouting can expose a safe nearby work layer.
         selected_counts = [counts_right, counts_left][int(do_left)]
         selected_max_bond = [max_bond_right, max_bond_left][int(do_left)]
-        if (
-            forced_drain_active
-            and forced_drain_max_threshold_multiple > 0
-            and selected_counts
-            > forced_drain_max_threshold_multiple * unswap_threshold
-        ):
-            # Memory guard on the drain's guard-bypass: at GPU scale the drain
-            # marched elems 11M -> 114.7M (bond 4091/4096) at the s2 mirror
-            # wall and the next unswap OOM-killed the process. A drain that
-            # would absorb something 4x over the unswap threshold fizzles
-            # instead -- back to unswap cycles, never a memory bomb.
-            logging.warning(
-                "[forced drain] fizzled: counts %s > %sx threshold %s",
-                selected_counts, forced_drain_max_threshold_multiple,
-                unswap_threshold)
-            forced_work_remaining = 0
-            forced_layer_remaining = 0
-            forced_drain_active = False
+        # Memory guard on the drain's guard-bypass: at GPU scale the drain
+        # marched elems 11M -> 114.7M (bond 4091/4096) at the s2 mirror wall and
+        # the next unswap OOM-killed the process. A drain that would absorb an
+        # over-large candidate fizzles instead -- back to unswap cycles, never a
+        # memory bomb.
+        #
+        # Two forms of "over-large":
+        #
+        # ABSOLUTE (multiple x unswap_threshold) is the original. Its flaw is
+        # that it compares against a CONSTANT while the thing it guards scales
+        # with the object: measured on d3_s2/d3_s1 M0 the drain's required
+        # absorb grows roughly geometrically with traversal depth
+        # (2.05M -> 2.56M -> 2.66M -> 4.57M -> 8.75M), so every fixed ceiling
+        # buys a few units and is then overtaken -- raising 4x to 16x moved the
+        # wall from u96 to u86 rather than removing it.
+        #
+        # RELATIVE (growth x current elems) scales with the traversal and still
+        # rejects the pathology this guard exists for: 11M -> 114.7M is a 10x
+        # jump, caught by any growth <= 10 at any absolute size.
+        #
+        # When --forced-drain-max-growth is set it REPLACES the absolute rule.
+        # The floor at unswap_threshold keeps the relative rule from being
+        # absurdly tight while the object is still small.
+        if forced_drain_active:
+            if forced_drain_max_growth > 0:
+                drain_limit = forced_drain_max_growth * max(
+                    elem_counts(mpo_core), unswap_threshold)
+                drain_reason = (f"{forced_drain_max_growth}x current elems "
+                                f"({elem_counts(mpo_core)})")
+            elif forced_drain_max_threshold_multiple > 0:
+                drain_limit = (
+                    forced_drain_max_threshold_multiple * unswap_threshold)
+                drain_reason = (f"{forced_drain_max_threshold_multiple}x "
+                                f"threshold {unswap_threshold}")
+            else:
+                drain_limit = None
+            if drain_limit is not None and selected_counts > drain_limit:
+                logging.warning(
+                    "[forced drain] fizzled: counts %s > %s",
+                    selected_counts, drain_reason)
+                forced_work_remaining = 0
+                forced_layer_remaining = 0
+                forced_drain_active = False
         selected_absorbable = (
             forced_drain_active
             or (

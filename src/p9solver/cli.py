@@ -482,6 +482,22 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--forced-drain-max-growth",
+        type=float,
+        default=0.0,
+        help=(
+            "Relative form of the forced-drain memory guard: cancel the drain "
+            "when its selected candidate exceeds this multiple of the CURRENT "
+            "object size. Set (>0) it REPLACES "
+            "--forced-drain-max-threshold-multiple. Prefer it: the drain's "
+            "required absorb grows geometrically with traversal depth "
+            "(measured 2.05M -> 8.75M on d3 M0), so a ceiling fixed against "
+            "--unswap-threshold is always outgrown, while a relative one "
+            "scales -- and still rejects the 11M -> 114.7M (10x) blow-up the "
+            "guard exists to prevent. 0 disables (use the absolute rule)."
+        ),
+    )
+    parser.add_argument(
         "--forced-drain-layer-budget",
         type=int,
         default=8,
@@ -1304,6 +1320,7 @@ def main(argv=None):
         forced_drain_max_threshold_multiple=(
             args.forced_drain_max_threshold_multiple
         ),
+        forced_drain_max_growth=args.forced_drain_max_growth,
         forced_drain_layer_budget=args.forced_drain_layer_budget,
         forced_drain_escalate=args.forced_drain_escalate,
         cutoff_schedule=(

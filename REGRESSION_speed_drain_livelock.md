@@ -50,3 +50,38 @@ carries the traversal past the wedge point.
 Keep `--forced-drain-max-threshold-multiple` at its 4.0 default: with the guard
 disabled the drain progresses by absorbing 4.57M-element candidates (9x the
 unswap threshold), which is the unbounded growth `71fc8ee` added it to stop.
+
+## 4. `--forced-drain-max-growth` (relative memory guard)
+
+Added after measuring that the drain's required absorb grows roughly
+geometrically with traversal depth on d3 M0:
+
+    2.05M (s2 u94) -> 2.56M (s1 u94) -> 2.66M (s2 u96) -> 4.57M (s2 u85) -> 8.75M (s2 u86)
+
+The absolute guard compares a candidate against `multiple x unswap_threshold`,
+a CONSTANT, so every fixed ceiling is eventually outgrown -- raising 4x to 16x
+moved the wall from u96 to u86 rather than removing it. The relative rule
+
+    selected_counts > growth * max(current_elems, unswap_threshold)
+
+scales with the traversal and still rejects the pathology the guard exists for:
+the 11M -> 114.7M blow-up in `71fc8ee` is a 10x jump, caught by any growth <= 10
+at any absolute size.
+
+Set (>0) it REPLACES the absolute rule; default 0 keeps the absolute rule.
+
+### Regression after the guard refactor
+
+Same default-flag A/B against pristine `21d1d45` (the control-flow around the
+guard was restructured, so this was re-run):
+
+- both runs `termination_reason=completed`, `final_max_bond=96`,
+  `final_total_elems=112724`
+- **non-timing behavioural diffs: NONE**, including the whole
+  `truncation_diagnostics` block
+- parameter diffs exactly `{outdir, forced_drain_layer_budget,
+  forced_drain_escalate, forced_drain_max_growth}`
+
+Suggested starting value: `--forced-drain-max-growth 4` (never absorb something
+more than 4x the current object). Untested at 48q — the arms in
+`SPEEDLAB_20260805.md` predate this flag.
