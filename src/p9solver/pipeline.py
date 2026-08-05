@@ -2115,16 +2115,6 @@ def mpo_compress_unswap(
 
             left_distance = distance_to_next_work(layers_left, ii_left)
             right_distance = distance_to_next_work(layers_right, ii_right)
-            extended_budget = adaptive_forced_drain_layer_budget(
-                forced_layer_remaining, left_distance, right_distance
-            )
-            if extended_budget > forced_layer_remaining:
-                logging.info(
-                    "[forced drain adaptive extension] layers %s -> %s",
-                    forced_layer_remaining,
-                    extended_budget,
-                )
-                forced_layer_remaining = extended_budget
             drain_rule = "distance"
             if (
                 forced_drain_by_cost
@@ -2146,6 +2136,20 @@ def mpo_compress_unswap(
                     do_left = left_distance < right_distance
             elif left_distance != right_distance:
                 do_left = left_distance < right_distance
+            selected_distance = left_distance if do_left else right_distance
+            extended_budget = adaptive_forced_drain_layer_budget(
+                forced_layer_remaining, selected_distance
+            )
+            if extended_budget > forced_layer_remaining:
+                logging.info(
+                    "[forced drain adaptive extension] chosen=%s distance=%s "
+                    "layers %s -> %s",
+                    "left" if do_left else "right",
+                    selected_distance,
+                    forced_layer_remaining,
+                    extended_budget,
+                )
+                forced_layer_remaining = extended_budget
             logging.info(
                 "[forced drain frontier] left_distance=%s right_distance=%s "
                 "counts_left=%s counts_right=%s rule=%s chosen=%s",
