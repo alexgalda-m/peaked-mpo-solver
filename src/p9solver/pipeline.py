@@ -1451,6 +1451,7 @@ def mpo_compress_unswap(
     staged_transpilation=False,
     staged_activate_per_side=False,
     forced_drain_by_cost=False,
+    forced_drain_max_threshold_multiple=4.0,
     cutoff_schedule=None,
 ):
     if swap_gate_representation == "current":
@@ -2131,15 +2132,21 @@ def mpo_compress_unswap(
         # ineffective unswap: rerouting can expose a safe nearby work layer.
         selected_counts = [counts_right, counts_left][int(do_left)]
         selected_max_bond = [max_bond_right, max_bond_left][int(do_left)]
-        if forced_drain_active and selected_counts > 4 * unswap_threshold:
+        if (
+            forced_drain_active
+            and forced_drain_max_threshold_multiple > 0
+            and selected_counts
+            > forced_drain_max_threshold_multiple * unswap_threshold
+        ):
             # Memory guard on the drain's guard-bypass: at GPU scale the drain
             # marched elems 11M -> 114.7M (bond 4091/4096) at the s2 mirror
             # wall and the next unswap OOM-killed the process. A drain that
             # would absorb something 4x over the unswap threshold fizzles
             # instead -- back to unswap cycles, never a memory bomb.
             logging.warning(
-                "[forced drain] fizzled: counts %s > 4x threshold %s",
-                selected_counts, unswap_threshold)
+                "[forced drain] fizzled: counts %s > %sx threshold %s",
+                selected_counts, forced_drain_max_threshold_multiple,
+                unswap_threshold)
             forced_work_remaining = 0
             forced_layer_remaining = 0
             forced_drain_active = False

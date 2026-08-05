@@ -471,6 +471,17 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--forced-drain-max-threshold-multiple",
+        type=float,
+        default=4.0,
+        help=(
+            "Cancel a no-progress forced drain when its selected candidate "
+            "exceeds this multiple of --unswap-threshold. Set to 0 to restore "
+            "the pre-fizzle behavior and permit the cheapest drain regardless "
+            "of size. Use only with recovery checkpoints."
+        ),
+    )
+    parser.add_argument(
         "--staged-activate-per-side",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -1266,6 +1277,9 @@ def main(argv=None):
         staged_transpilation=args.staged_transpilation,
         staged_activate_per_side=args.staged_activate_per_side,
         forced_drain_by_cost=args.forced_drain_by_cost,
+        forced_drain_max_threshold_multiple=(
+            args.forced_drain_max_threshold_multiple
+        ),
         cutoff_schedule=(
             [(float(f), float(c)) for f, c in
              (item.split(":") for item in args.cutoff_schedule.split(","))]
