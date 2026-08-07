@@ -145,12 +145,39 @@ class TruncationFid10Tracker:
                     is_torch = type(x).__module__.startswith("torch")
                     if not is_torch and isinstance(err, RuntimeError)                             and not isinstance(err, np.linalg.LinAlgError):
                         raise
-                    U, s, VH = scipy_linalg.svd(
-                        _as_np(x, np.complex128),
-                        full_matrices=False,
-                        check_finite=False,
-                        lapack_driver="gesvd",
-                    )
+                    try:
+                        U, s, VH = scipy_linalg.svd(
+                            _as_np(x, np.complex128),
+                            full_matrices=False,
+                            check_finite=False,
+                            lapack_driver="gesvd",
+                        )
+                    except np.linalg.LinAlgError:
+                        # gesvd itself can fail to converge on ill-conditioned
+                        # blocks (fatal in seeded MPO+unswap runs). QR-precondition
+                        # first — svd of the small triangular factor is far
+                        # better conditioned and accuracy-preserving — then a
+                        # norm-scaled 1e-12 jitter as last resort (relative
+                        # perturbation far below any working cutoff).
+                        xn = _as_np(x, np.complex128)
+                        try:
+                            Q, R = scipy_linalg.qr(xn, mode="economic")
+                            U_r, s, VH = scipy_linalg.svd(
+                                R, full_matrices=False, check_finite=False,
+                                lapack_driver="gesvd",
+                            )
+                            U = Q @ U_r
+                        except np.linalg.LinAlgError:
+                            scale = np.linalg.norm(xn) / max(xn.size, 1)
+                            rng = np.random.default_rng(0)
+                            xj = xn + (1e-12 * scale) * (
+                                rng.standard_normal(xn.shape)
+                                + 1j * rng.standard_normal(xn.shape)
+                            )
+                            U, s, VH = scipy_linalg.svd(
+                                xj, full_matrices=False, check_finite=False,
+                                lapack_driver="gesvd",
+                            )
                     if is_torch:
                         import torch
                         real = (torch.float32
