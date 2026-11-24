@@ -1289,6 +1289,76 @@ def unswap(
     return mpo, (perm_left, perm_right), stats_data
 
 
+def escape_probe(
+    mpo,
+    n_attempts,
+    max_bond,
+    cutoff,
+    hows,
+    max_its,
+    to_backend=None,
+    swap_apply_method="mpo",
+    swap_gate_representation="cx",
+    seed=0,
+):
+    """Non-greedy escape test for a greedy-unswap local minimum.
+
+    The baseline unswapper only keeps strictly bond-reducing adjacent swaps, so
+    it halts at the first permutation where no single swap layer lowers a bond.
+    From that floor this tries ``n_attempts`` random uphill "kicks" (adjacent
+    SWAP layers applied to both operator legs, i.e. a relabeling of qubit lines)
+    each followed by a fresh greedy descent, and returns the smallest MPO found.
+
+    If the best kicked+descended MPO is much smaller than the floor, the wall is
+    a permutation artifact the greedy selector can't cross (worth a real search).
+    If every kick descends back to ~the same size, the bond is intrinsic to the
+    state's entanglement at this cut and no reordering can help.
+
+    Returns ``(floor, best, best_attempt)`` with floor/best as
+    ``(max_bond, total_elems)`` tuples.
+    """
+    rng = np.random.default_rng(seed)
+    num_qubits = len(mpo.sites)
+    all_pairs = [(i, i + 1) for i in range(num_qubits - 1)]
+    floor = (int(mpo.max_bond()), int(elem_counts(mpo)))
+    best = floor
+    best_attempt = 0
+    for attempt in range(1, n_attempts + 1):
+        kicked = mpo
+        # Kick strength rotates through 1..4 swap layers for basin diversity.
+        for _ in range(1 + (attempt % 4)):
+            parity = int(rng.integers(0, 2))
+            layer = [pair for pair in all_pairs[parity::2] if rng.random() < 0.5]
+            if layer:
+                kicked = apply_swaps(
+                    kicked,
+                    swaps_l=layer,
+                    swaps_r=layer,
+                    max_bond=max_bond,
+                    cutoff=cutoff,
+                    to_backend=to_backend,
+                    method=swap_apply_method,
+                    swap_gate_representation=swap_gate_representation,
+                )
+        descended, _, _ = unswap(
+            kicked,
+            hows=hows,
+            max_bond=max_bond,
+            cutoff=cutoff,
+            max_its=max_its,
+            to_backend=to_backend,
+            swap_apply_method=swap_apply_method,
+            swap_gate_representation=swap_gate_representation,
+            unswap_select_mode="bond",
+        )
+        cand = (int(descended.max_bond()), int(elem_counts(descended)))
+        # Rank by total elements first, then peak bond.
+        if (cand[1], cand[0]) < (best[1], best[0]):
+            best = cand
+            best_attempt = attempt
+    return floor, best, best_attempt
+
+
 # ------------------------------------------------------------------
 #  MPO Cancellation + Unswapping
 # ------------------------------------------------------------------
@@ -1355,6 +1425,9 @@ def mpo_compress_unswap(
     unswap_alignment_protect_gain=None,
     unswap_alignment_max_replacements=None,
     unswap_alignment_tie_loss=1.0,
+    unswap_escape_probe=0,
+    unswap_swap_freeflow=False,
+    unswap_swap_freeflow_factor=20.0,
 ):
     if swap_gate_representation == "current":
         routed_swap_representation = "block"
@@ -1602,9 +1675,19 @@ def mpo_compress_unswap(
                 cutoff=cutoff,
             )
 
-        def is_absorbable(mpo):
+        swap_freeflow_ceiling = unswap_threshold * unswap_swap_freeflow_factor
+
+        def is_absorbable(mpo, swap_only=False):
             if mpo is None:
                 return False
+            # Pure-SWAP frontier layers (no work gates) spread entanglement
+            # across the chain, inflating total_elems past the unswap trigger
+            # without making work-gate progress. With free-flow enabled, let
+            # them absorb past the element trigger (up to a safety ceiling; the
+            # hard max_bond cap is still enforced by truncation) so the solver
+            # reaches the next work layer instead of thrashing the unswap loop.
+            if swap_only and unswap_swap_freeflow:
+                return elem_counts(mpo) < swap_freeflow_ceiling
             if elem_counts(mpo) >= unswap_threshold:
                 return False
             return unswap_trigger_max_bond is None or mpo.max_bond() <= unswap_trigger_max_bond
@@ -1669,10 +1752,16 @@ def mpo_compress_unswap(
         lookahead_choice = None
         lookahead_score = None
         lookahead_time_s = 0.0
+        left_swap_only = (
+            ii_left < len(layers_left) and count_work_ops(layers_left[ii_left]) == 0
+        )
+        right_swap_only = (
+            ii_right < len(layers_right) and count_work_ops(layers_right[ii_right]) == 0
+        )
         if flip_freq is None:
             eligible = []
-            left_absorbable = is_absorbable(mpo_left)
-            right_absorbable = is_absorbable(mpo_right)
+            left_absorbable = is_absorbable(mpo_left, left_swap_only)
+            right_absorbable = is_absorbable(mpo_right, right_swap_only)
             if left_absorbable:
                 eligible.append(("L", score_absorb_candidate(mpo_left, absorb_score)))
             if right_absorbable:
@@ -1747,13 +1836,9 @@ def mpo_compress_unswap(
         # Select the smallest one
         selected_counts = [counts_right, counts_left][int(do_left)]
         selected_max_bond = [max_bond_right, max_bond_left][int(do_left)]
-        selected_absorbable = (
-            selected_counts < unswap_threshold
-            and (
-                unswap_trigger_max_bond is None
-                or selected_max_bond <= unswap_trigger_max_bond
-            )
-        )
+        selected_mpo = mpo_left if do_left else mpo_right
+        selected_swap_only = left_swap_only if do_left else right_swap_only
+        selected_absorbable = is_absorbable(selected_mpo, selected_swap_only)
         if selected_absorbable:
             if do_left:
                 mpo_core = mpo_left
@@ -2052,6 +2137,42 @@ def mpo_compress_unswap(
             
             ii_left = 0
             ii_right = 0
+            if cycle_work_consumed == 0 and unswap_escape_probe and unswap_escape_probe > 0:
+                escape_floor, escape_best, escape_attempt = escape_probe(
+                    mpo_core,
+                    unswap_escape_probe,
+                    max_bond=max_bond,
+                    cutoff=cutoff,
+                    hows=hows,
+                    max_its=max_its,
+                    to_backend=to_backend,
+                    swap_apply_method=swap_apply_method,
+                    swap_gate_representation=unswap_swap_representation,
+                    seed=(seed or 0) + unswap_cycles,
+                )
+                escapable = escape_best[1] < escape_floor[1]
+                msg = (
+                    f"[escape_probe] cycle={unswap_cycles} "
+                    f"greedy_floor(max_bond={escape_floor[0]}, elems={escape_floor[1]}) | "
+                    f"best_over_{unswap_escape_probe}_kicks(max_bond={escape_best[0]}, "
+                    f"elems={escape_best[1]}, attempt={escape_attempt}) | escapable={escapable}"
+                )
+                print(msg, flush=True)
+                logging.error(msg)
+                stats_data.append({
+                    "time": time.perf_counter() - t0,
+                    "stage": "escape_probe",
+                    "unswap_cycle": unswap_cycles,
+                    "escape_attempts": unswap_escape_probe,
+                    "escape_floor_max_bond": escape_floor[0],
+                    "escape_floor_elems": escape_floor[1],
+                    "escape_best_max_bond": escape_best[0],
+                    "escape_best_elems": escape_best[1],
+                    "escape_best_attempt": escape_attempt,
+                    "escape_escapable": escapable,
+                })
+                if on_stats is not None:
+                    on_stats(stats_data[-1])
             if cycle_work_consumed == 0:
                 no_progress_unswap_cycles += 1
             else:

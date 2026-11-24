@@ -630,6 +630,39 @@ def build_parser():
             "Use INFO to restore verbose terminal logs."
         ),
     )
+    parser.add_argument(
+        "--unswap-escape-probe",
+        type=int,
+        default=0,
+        help=(
+            "When an unswap cycle makes no progress (greedy local minimum), run "
+            "this many random uphill 'kick' + greedy-descent restarts and log the "
+            "smallest MPO found vs the greedy floor. Diagnoses whether the bond "
+            "wall is a permutation artifact (escapable) or intrinsic entanglement. "
+            "0 disables (default)."
+        ),
+    )
+    parser.add_argument(
+        "--unswap-swap-freeflow",
+        action="store_true",
+        help=(
+            "Let pure-SWAP frontier layers (no work gates) absorb past the "
+            "element-count unswap trigger, up to a safety ceiling, so the solver "
+            "plows through routing-SWAP-heavy regions to reach the next work layer "
+            "instead of thrashing the unswap loop. Targets the P11 routing-SWAP "
+            "stall. max_bond is still enforced. Off by default (P9 unaffected)."
+        ),
+    )
+    parser.add_argument(
+        "--unswap-swap-freeflow-factor",
+        type=float,
+        default=20.0,
+        help=(
+            "Safety ceiling for --unswap-swap-freeflow as a multiple of "
+            "--unswap-threshold (default 20x). SWAP layers stop free-flowing once "
+            "total_elems would exceed this, preventing runaway memory."
+        ),
+    )
     return parser
 
 
@@ -864,6 +897,9 @@ def main(argv=None):
         unswap_alignment_protect_gain=args.unswap_alignment_protect_gain,
         unswap_alignment_max_replacements=args.unswap_alignment_max_replacements,
         unswap_alignment_tie_loss=args.unswap_alignment_tie_loss,
+        unswap_escape_probe=args.unswap_escape_probe,
+        unswap_swap_freeflow=args.unswap_swap_freeflow,
+        unswap_swap_freeflow_factor=args.unswap_swap_freeflow_factor,
     )
     compress_time = time.perf_counter() - compression_started
 
